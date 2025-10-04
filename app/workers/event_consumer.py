@@ -46,26 +46,32 @@ class EventConsumer(BaseConsumer):
         # Route to appropriate handler
         success = False
         try:
+            # Use nest_asyncio to allow nested event loops
+            import nest_asyncio
+            nest_asyncio.apply()
+
+            loop = asyncio.get_event_loop()
+
             if event_type == "message":
-                success = asyncio.run(self._handle_message_event(event, team_id))
+                success = loop.run_until_complete(self._handle_message_event(event, team_id))
             elif event_type == "message_changed":
-                success = asyncio.run(self._handle_message_changed(event, team_id))
+                success = loop.run_until_complete(self._handle_message_changed(event, team_id))
             elif event_type == "message_deleted":
-                success = asyncio.run(self._handle_message_deleted(event, team_id))
+                success = loop.run_until_complete(self._handle_message_deleted(event, team_id))
             elif event_type == "reaction_added":
-                success = asyncio.run(self._handle_reaction_added(event, team_id))
+                success = loop.run_until_complete(self._handle_reaction_added(event, team_id))
             elif event_type == "reaction_removed":
-                success = asyncio.run(self._handle_reaction_removed(event, team_id))
+                success = loop.run_until_complete(self._handle_reaction_removed(event, team_id))
             elif event_type == "file_shared":
-                success = asyncio.run(self._handle_file_shared(event, team_id))
+                success = loop.run_until_complete(self._handle_file_shared(event, team_id))
             elif event_type == "channel_created":
-                success = asyncio.run(self._handle_channel_created(event, team_id))
+                success = loop.run_until_complete(self._handle_channel_created(event, team_id))
             elif event_type == "channel_rename":
-                success = asyncio.run(self._handle_channel_rename(event, team_id))
+                success = loop.run_until_complete(self._handle_channel_rename(event, team_id))
             elif event_type == "member_joined_channel":
-                success = asyncio.run(self._handle_member_joined(event, team_id))
+                success = loop.run_until_complete(self._handle_member_joined(event, team_id))
             elif event_type == "member_left_channel":
-                success = asyncio.run(self._handle_member_left(event, team_id))
+                success = loop.run_until_complete(self._handle_member_left(event, team_id))
             else:
                 logger.warning("unknown_event_type", event_type=event_type)
                 success = True  # Don't retry unknown events

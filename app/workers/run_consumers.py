@@ -40,16 +40,19 @@ def run_processing_consumer():
     """Run processing consumer in separate process"""
     from app.core.database import db_manager
     from app.core.cache import cache_manager
+    from app.core.queue import queue_manager
 
     async def main():
         db_manager.initialize()
         await cache_manager.initialize()
+        queue_manager.initialize()  # Initialize queue_manager for publishing
 
         try:
             processing_consumer.connect()
             processing_consumer.start_consuming()
         finally:
             processing_consumer.close()
+            queue_manager.close()
             await db_manager.close()
             await cache_manager.close()
 

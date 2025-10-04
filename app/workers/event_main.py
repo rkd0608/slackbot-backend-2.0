@@ -11,8 +11,11 @@ logger = get_logger(__name__)
 
 async def main():
     """Run event consumer"""
+    from app.core.queue import queue_manager
+
     db_manager.initialize()
     await cache_manager.initialize()
+    queue_manager.initialize()  # Initialize queue_manager for publishing
 
     try:
         event_consumer.connect()
@@ -22,6 +25,7 @@ async def main():
         logger.info("event_consumer_shutdown")
     finally:
         event_consumer.close()
+        queue_manager.close()
         await db_manager.close()
         await cache_manager.close()
 

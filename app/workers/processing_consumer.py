@@ -23,14 +23,20 @@ class ProcessingConsumer(BaseConsumer):
         logger.info("processing_task", task_type=task_type)
 
         try:
+            # Use nest_asyncio to allow nested event loops
+            import nest_asyncio
+            nest_asyncio.apply()
+
+            loop = asyncio.get_event_loop()
+
             if task_type == "file_processing":
-                return asyncio.run(self._process_file(message))
+                return loop.run_until_complete(self._process_file(message))
             elif task_type == "channel_sync":
-                return asyncio.run(self._sync_channel(message))
+                return loop.run_until_complete(self._sync_channel(message))
             elif task_type == "member_sync":
-                return asyncio.run(self._sync_member(message))
+                return loop.run_until_complete(self._sync_member(message))
             elif task_type == "user_sync":
-                return asyncio.run(self._sync_user(message))
+                return loop.run_until_complete(self._sync_user(message))
             else:
                 logger.warning("unknown_task_type", task_type=task_type)
                 return True  # Don't retry unknown tasks
