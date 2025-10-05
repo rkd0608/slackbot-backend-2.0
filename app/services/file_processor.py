@@ -19,7 +19,7 @@ class FileProcessor:
     # Supported file types for text extraction
     TEXT_EXTRACTABLE = {
         'text', 'python', 'javascript', 'java', 'go', 'rust',
-        'markdown', 'json', 'xml', 'yaml', 'csv', 'sql'
+        'markdown', 'json', 'xml', 'yaml', 'csv', 'sql', 'html'
     }
 
     PDF_TYPES = {'pdf'}
@@ -32,11 +32,16 @@ class FileProcessor:
         channel_id: str,
         user_id: str,
         team_id: str,
-        db: AsyncSession
+        db: AsyncSession,
+        message_id: Optional[str] = None
     ) -> Optional[File]:
         """Process a file from Slack"""
 
         file_id = file_info.get("id")
+
+        if not file_id:
+            logger.error("file_processing_missing_id", file_info=str(file_info)[:200])
+            return None
 
         # Check if already processed
         result = await db.execute(
@@ -49,24 +54,50 @@ class FileProcessor:
             return existing
 
         # Create or update file record
-        file_record = existing or File(
+        if existing:
+            # Update existing record with new data
+            existing.message_id = message_id or existing.message_id
+            existing.channel_id = channel_id or existing.channel_id
+            existing.user_id = user_id or existing.user_id
+            existing.filename = file_info.get("name", existing.filename)
+            existing.title = file_info.get("title", existing.title)
+            existing.mimetype = file_info.get("mimetype", existing.mimetype)
+            existing.filetype = file_info.get("filetype", existing.filetype)
+            existing.size = file_info.get("size", existing.size)
+            existing.slack_url = file_info.get("url_private", existing.slack_url)
+            file_record = existing
+        else:
+            # Create new record
+            file_record = File(
+                file_id=file_id,
+                message_id=message_id,
+                channel_id=channel_id,
+                user_id=user_id,
+                filename=file_info.get("name", "unknown"),
+                title=file_info.get("title"),
+                mimetype=file_info.get("mimetype"),
+                filetype=file_info.get("filetype"),
+                size=file_info.get("size", 0),
+                slack_url=file_info.get("url_private"),
+                slack_created_at=datetime.fromtimestamp(file_info.get("created", 0)),
+                expires_at=datetime.utcnow() + timedelta(days=30)
+            )
+
+        # Log file info for debugging
+        logger.info(
+            "processing_file",
             file_id=file_id,
-            channel_id=channel_id,
-            user_id=user_id,
-            filename=file_info.get("name", "unknown"),
-            title=file_info.get("title"),
-            mimetype=file_info.get("mimetype"),
-            filetype=file_info.get("filetype"),
-            size=file_info.get("size", 0),
-            slack_url=file_info.get("url_private"),
-            slack_created_at=datetime.fromtimestamp(file_info.get("created", 0)),
-            expires_at=datetime.utcnow() + timedelta(days=30)
+            filename=file_record.filename,
+            filetype=file_record.filetype,
+            size=file_record.size,
+            has_url=bool(file_record.slack_url)
         )
 
         if not existing:
             db.add(file_record)
-            await db.commit()
-            await db.refresh(file_record)
+
+        await db.commit()
+        await db.refresh(file_record)
 
         # Download file from Slack
         try:

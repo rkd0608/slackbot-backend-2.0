@@ -94,7 +94,7 @@ class EmbeddingService:
                 "channel_name": message.channel_name or "",
                 "user_id": message.user_id,
                 "user_name": message.user_name or "",
-                "timestamp": message.timestamp.isoformat(),
+                "timestamp": message.timestamp.timestamp(),  # Unix timestamp for numeric filtering
                 "thread_ts": message.thread_ts or "",
                 "is_thread_parent": message.is_thread_parent,
                 "text": message.text[:1000] if message.text else "",  # Truncate for metadata
@@ -170,6 +170,7 @@ class EmbeddingService:
         """Generate and store embedding for a file"""
         try:
             from app.models.file import File
+            from app.models.channel import Channel
 
             result = await db.execute(
                 select(File).where(File.file_id == file_id)
@@ -179,10 +180,22 @@ class EmbeddingService:
             if not file_record or not file_record.extracted_text:
                 return False
 
+            # Get channel name
+            channel_name = None
+            if file_record.channel_id:
+                channel_result = await db.execute(
+                    select(Channel).where(Channel.channel_id == file_record.channel_id)
+                )
+                channel = channel_result.scalar_one_or_none()
+                if channel:
+                    channel_name = channel.channel_name
+
             # Build context
             context = f"File: {file_record.filename}\n"
             if file_record.title:
                 context += f"Title: {file_record.title}\n"
+            if channel_name:
+                context += f"Channel: #{channel_name}\n"
             context += f"Content: {file_record.extracted_text}"
 
             # Generate embedding
@@ -205,6 +218,10 @@ class EmbeddingService:
                 "timestamp": file_record.created_at.isoformat(),
                 "text": file_record.extracted_text[:1000]
             }
+
+            # Add channel_name if available
+            if channel_name:
+                metadata["channel_name"] = channel_name
 
             # Upsert to Pinecone
             success = vector_db_manager.upsert([{

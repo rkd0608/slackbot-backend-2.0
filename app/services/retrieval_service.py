@@ -146,39 +146,65 @@ class RetrievalService:
         """Semantic vector search using Pinecone"""
 
         try:
-            # Generate query embedding
-            query_embedding = await embedding_service.generate_embedding(query)
+            # Rewrite query to improve semantic matching
+            search_query = self._rewrite_query(query, query_analysis)
+            logger.info("query_rewritten", original=query[:100], rewritten=search_query[:100])
 
-            if not query_embedding:
-                logger.error("query_embedding_failed")
-                return []
+            # Expand query for better recall (if enabled)
+            from app.services.query_expander import query_expander
+            query_variations = await query_expander.expand_query(search_query, max_expansions=2)
 
-            # Build metadata filter based on query analysis
+            # Build metadata filter (same for all variations)
             metadata_filter = await self._build_metadata_filter(
                 query_analysis,
                 user_id,
                 db
             )
 
-            # Query Pinecone
-            matches = vector_db_manager.query(
-                vector=query_embedding,
-                top_k=100,  # Get more for fusion
-                filter_dict=metadata_filter,
-                include_metadata=True
+            # Search with each query variation
+            all_results = []
+            seen_message_ids = {}  # Track best score for each message
+
+            for q_variant in query_variations:
+                # Generate embedding for this variation
+                query_embedding = await embedding_service.generate_embedding(q_variant)
+
+                if not query_embedding:
+                    continue
+
+                # Query Pinecone
+                matches = vector_db_manager.query(
+                    vector=query_embedding,
+                    top_k=50,  # Get fewer per variation
+                    filter_dict=metadata_filter,
+                    include_metadata=True
+                )
+
+                # Collect results, tracking best score per message
+                for match in matches:
+                    msg_id = match.get("metadata", {}).get("message_id")
+                    score = match.get("score", 0.0)
+
+                    # Keep highest score for each message
+                    if msg_id not in seen_message_ids or score > seen_message_ids[msg_id]["score"]:
+                        seen_message_ids[msg_id] = {
+                            "message_id": msg_id,
+                            "score": score,
+                            "source": "semantic",
+                            "query_variant": q_variant if len(query_variations) > 1 else None,
+                            "metadata": match.get("metadata", {})
+                        }
+
+            # Convert to list and sort by score
+            results = list(seen_message_ids.values())
+            results.sort(key=lambda x: x["score"], reverse=True)
+            results = results[:100]  # Top 100
+
+            logger.info(
+                "semantic_search_completed",
+                query_variations=len(query_variations),
+                unique_results=len(results)
             )
-
-            # Format results
-            results = []
-            for match in matches:
-                results.append({
-                    "message_id": match.get("metadata", {}).get("message_id"),
-                    "score": match.get("score", 0.0),
-                    "source": "semantic",
-                    "metadata": match.get("metadata", {})
-                })
-
-            logger.info("semantic_search_completed", results=len(results))
             return results
 
         except Exception as e:
@@ -494,18 +520,54 @@ class RetrievalService:
         temporal = query_analysis.get("temporal")
         if temporal:
             if temporal.get("start_date"):
-                filters["timestamp"] = {"$gte": temporal["start_date"].isoformat()}
+                filters["timestamp"] = {"$gte": temporal["start_date"].timestamp()}
             if temporal.get("end_date"):
                 if "timestamp" in filters:
-                    filters["timestamp"]["$lte"] = temporal["end_date"].isoformat()
+                    filters["timestamp"]["$lte"] = temporal["end_date"].timestamp()
                 else:
-                    filters["timestamp"] = {"$lte": temporal["end_date"].isoformat()}
+                    filters["timestamp"] = {"$lte": temporal["end_date"].timestamp()}
 
         # Code filter
         if query_analysis.get("has_code_intent"):
             filters["has_code"] = True
 
         return filters if filters else None
+
+    def _rewrite_query(self, query: str, query_analysis: Dict[str, Any]) -> str:
+        """Rewrite conversational query to improve semantic matching"""
+        import re
+
+        # Remove common conversational prefixes
+        rewritten = query.lower()
+
+        # Remove question words and conversational phrases
+        conversational_patterns = [
+            r'^(can you |could you |please |would you |do you have |where is |what is |show me |find |get |fetch )',
+            r'(please|thanks|thank you)$',
+            r'\?$'
+        ]
+
+        for pattern in conversational_patterns:
+            rewritten = re.sub(pattern, '', rewritten, flags=re.IGNORECASE)
+
+        rewritten = rewritten.strip()
+
+        # If the query analysis has entities, include them
+        entities = query_analysis.get("entities", [])
+        if entities:
+            entity_texts = [e["text"] for e in entities if e.get("text")]
+            if entity_texts:
+                # Add entity context to improve matching
+                rewritten = f"{rewritten} {' '.join(entity_texts)}"
+
+        # If it's a code query, emphasize that
+        if query_analysis.get("has_code_intent"):
+            rewritten = f"code {rewritten}"
+
+        # Clean up extra spaces
+        rewritten = ' '.join(rewritten.split())
+
+        return rewritten if rewritten else query
 
 
 # Global retrieval service instance

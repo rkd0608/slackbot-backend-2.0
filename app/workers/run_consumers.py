@@ -41,11 +41,13 @@ def run_processing_consumer():
     from app.core.database import db_manager
     from app.core.cache import cache_manager
     from app.core.queue import queue_manager
+    from app.core.vector_db import vector_db_manager
 
     async def main():
         db_manager.initialize()
         await cache_manager.initialize()
         queue_manager.initialize()  # Initialize queue_manager for publishing
+        vector_db_manager.initialize()  # Initialize Pinecone for embeddings
 
         try:
             processing_consumer.connect()

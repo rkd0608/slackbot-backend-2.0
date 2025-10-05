@@ -13,10 +13,13 @@ logger = get_logger(__name__)
 
 async def main():
     """Run processing consumer"""
+    from app.core.vector_db import vector_db_manager
+
     db_manager.initialize()
     await cache_manager.initialize()
     storage_manager.initialize()
     slack_client_manager.initialize()
+    vector_db_manager.initialize()  # Initialize Pinecone for embeddings
 
     try:
         processing_consumer.connect()

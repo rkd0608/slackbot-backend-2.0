@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     slack_signing_secret: str = Field(..., min_length=1)
     slack_client_id: str = Field(..., min_length=1)
     slack_client_secret: str = Field(..., min_length=1)
+    slack_bot_user_id: Optional[str] = Field(default=None)  # Bot's user ID for filtering
 
     # MySQL Configuration
     mysql_host: str = Field(default="localhost")
@@ -92,6 +93,15 @@ class Settings(BaseSettings):
     retrieval_candidates: int = Field(default=200)
     rerank_top_k: int = Field(default=50)
     cache_ttl_seconds: int = Field(default=300)
+
+    # Query Enhancement Features
+    enable_query_rewriting: bool = Field(default=True)
+    query_rewriter_model: str = Field(default="gpt-3.5-turbo")
+    query_rewriter_max_history: int = Field(default=6)  # Last 6 messages (3 turns)
+    enable_llm_entity_extraction: bool = Field(default=False)  # Expensive, use regex by default
+    enable_query_expansion: bool = Field(default=True)  # Generate synonym variations for better recall
+    enable_llm_query_analysis: bool = Field(default=True)  # Use GPT-4 for comprehensive query analysis
+    query_analyzer_model: str = Field(default="gpt-4o-mini")  # Model for query analysis
 
     # Rate Limiting
     query_rate_limit_per_hour: int = Field(default=100)

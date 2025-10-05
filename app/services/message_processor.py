@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models.message import Message
 from app.models.thread import Thread
+from app.models.user import User
 from app.core.logging import get_logger
 from app.core.queue import queue_manager
 
@@ -32,6 +33,11 @@ class MessageProcessor:
 
         # Extract message data
         message_data = self._extract_message_data(event, team_id)
+
+        # Enrich with user name from database
+        if message_data.get("user_id") and not message_data.get("user_name"):
+            user_name = await self._get_user_name(message_data["user_id"], db)
+            message_data["user_name"] = user_name
 
         # If we cannot derive a valid user identifier, skip persisting
         if not message_data.get("user_id"):
@@ -278,6 +284,36 @@ class MessageProcessor:
 
             await db.commit()
             logger.info("thread_updated", thread_ts=message.thread_ts)
+
+    async def _get_user_name(self, user_id: str, db: AsyncSession) -> Optional[str]:
+        """Get user name from Users table, sync if not found"""
+        try:
+            # Check if user exists in database
+            result = await db.execute(
+                select(User).where(User.user_id == user_id)
+            )
+            user = result.scalar_one_or_none()
+
+            if user and user.display_name:
+                return user.display_name
+            elif user and user.real_name:
+                return user.real_name
+            elif user and user.username:
+                return user.username
+
+            # User not in DB or no name - sync from Slack
+            from app.services.sync_service import sync_service
+            synced_user = await sync_service.sync_user(user_id, db)
+
+            if synced_user:
+                return synced_user.display_name or synced_user.real_name or synced_user.username
+
+            logger.warning("user_name_not_found", user_id=user_id)
+            return None
+
+        except Exception as e:
+            logger.error("get_user_name_error", user_id=user_id, error=str(e))
+            return None
 
 
 # Global message processor instance

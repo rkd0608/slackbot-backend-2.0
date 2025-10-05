@@ -21,7 +21,7 @@ from app.core.exceptions import (
     PermissionException
 )
 
-from app.api import health, events, admin, query, answer
+from app.api import health, events, admin, query, answer, commands
 
 # Setup logging
 setup_logging()
@@ -101,6 +101,7 @@ async def base_exception_handler(request: Request, exc: SlackIntelligenceExcepti
 # Include routers
 app.include_router(health.router, prefix="/api/v1", tags=["health"])
 app.include_router(events.router, prefix="/api/v1", tags=["events"])
+app.include_router(commands.router, prefix="/api/v1", tags=["commands"])
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 app.include_router(query.router, prefix="/api/v1", tags=["query"])
 app.include_router(answer.router, prefix="/api/v1", tags=["answer"])

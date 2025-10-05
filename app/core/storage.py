@@ -17,23 +17,32 @@ class StorageManager:
 
     def initialize(self):
         """Initialize S3 client"""
-        self.s3_client = boto3.client(
-            's3',
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            region_name=settings.aws_region
-        )
-
-        # Verify bucket exists
         try:
+            self.s3_client = boto3.client(
+                's3',
+                aws_access_key_id=settings.aws_access_key_id,
+                aws_secret_access_key=settings.aws_secret_access_key,
+                region_name=settings.aws_region
+            )
+
+            # Verify bucket exists
             self.s3_client.head_bucket(Bucket=self.bucket)
             logger.info("storage_initialized", bucket=self.bucket)
         except ClientError as e:
-            logger.error("storage_init_error", bucket=self.bucket, error=str(e))
-            raise
+            logger.warning(
+                "storage_init_failed",
+                bucket=self.bucket,
+                error=str(e),
+                message="S3 storage unavailable - file operations will be disabled"
+            )
+            self.s3_client = None
 
     def upload_file(self, file_data: bytes, key: str, content_type: Optional[str] = None) -> bool:
         """Upload file to S3"""
+        if not self.s3_client:
+            logger.warning("upload_skipped", key=key, reason="S3 client not initialized")
+            return False
+
         try:
             extra_args = {}
             if content_type:
@@ -53,6 +62,10 @@ class StorageManager:
 
     def download_file(self, key: str) -> Optional[bytes]:
         """Download file from S3"""
+        if not self.s3_client:
+            logger.warning("download_skipped", key=key, reason="S3 client not initialized")
+            return None
+
         try:
             response = self.s3_client.get_object(Bucket=self.bucket, Key=key)
             return response['Body'].read()
@@ -62,6 +75,10 @@ class StorageManager:
 
     def delete_file(self, key: str) -> bool:
         """Delete file from S3"""
+        if not self.s3_client:
+            logger.warning("delete_skipped", key=key, reason="S3 client not initialized")
+            return False
+
         try:
             self.s3_client.delete_object(Bucket=self.bucket, Key=key)
             logger.info("file_deleted", key=key)
@@ -72,6 +89,10 @@ class StorageManager:
 
     def generate_presigned_url(self, key: str, expiration: int = 3600) -> Optional[str]:
         """Generate presigned URL for file access"""
+        if not self.s3_client:
+            logger.warning("presigned_url_skipped", key=key, reason="S3 client not initialized")
+            return None
+
         try:
             url = self.s3_client.generate_presigned_url(
                 'get_object',

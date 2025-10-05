@@ -152,6 +152,112 @@ class SlackClientManager:
             logger.error("file_download_error", url=url, error=str(e))
             return None
 
+    async def post_message(
+        self,
+        channel: str,
+        text: str = None,
+        blocks: List[Dict[str, Any]] = None,
+        thread_ts: str = None
+    ) -> Optional[Dict[str, Any]]:
+        """Post a message to a channel or thread"""
+        try:
+            response = self.client.chat_postMessage(
+                channel=channel,
+                text=text,
+                blocks=blocks,
+                thread_ts=thread_ts
+            )
+            logger.info(
+                "message_posted",
+                channel=channel,
+                thread_ts=thread_ts,
+                ts=response["ts"]
+            )
+            return response.data
+        except SlackApiError as e:
+            logger.error("post_message_error", channel=channel, error=str(e))
+            return None
+
+    async def post_ephemeral(
+        self,
+        channel: str,
+        user: str,
+        text: str = None,
+        blocks: List[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Post an ephemeral message (only visible to specific user)"""
+        try:
+            response = self.client.chat_postEphemeral(
+                channel=channel,
+                user=user,
+                text=text,
+                blocks=blocks
+            )
+            logger.info("ephemeral_posted", channel=channel, user=user)
+            return response.data
+        except SlackApiError as e:
+            logger.error("post_ephemeral_error", channel=channel, user=user, error=str(e))
+            return None
+
+    async def add_reaction(
+        self,
+        channel: str,
+        timestamp: str,
+        reaction: str
+    ) -> bool:
+        """Add a reaction to a message"""
+        try:
+            self.client.reactions_add(
+                channel=channel,
+                timestamp=timestamp,
+                name=reaction
+            )
+            logger.info("reaction_added", channel=channel, ts=timestamp, reaction=reaction)
+            return True
+        except SlackApiError as e:
+            logger.error("add_reaction_error", channel=channel, ts=timestamp, error=str(e))
+            return False
+
+    async def remove_reaction(
+        self,
+        channel: str,
+        timestamp: str,
+        reaction: str
+    ) -> bool:
+        """Remove a reaction from a message"""
+        try:
+            self.client.reactions_remove(
+                channel=channel,
+                timestamp=timestamp,
+                name=reaction
+            )
+            logger.info("reaction_removed", channel=channel, ts=timestamp, reaction=reaction)
+            return True
+        except SlackApiError as e:
+            logger.error("remove_reaction_error", channel=channel, ts=timestamp, error=str(e))
+            return False
+
+    async def update_message(
+        self,
+        channel: str,
+        timestamp: str,
+        text: str = None,
+        blocks: List[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Update an existing message"""
+        try:
+            response = self.client.chat_update(
+                channel=channel,
+                ts=timestamp,
+                text=text,
+                blocks=blocks
+            )
+            logger.info("message_updated", channel=channel, ts=timestamp)
+            return response.data
+        except SlackApiError as e:
+            logger.error("update_message_error", channel=channel, ts=timestamp, error=str(e))
+            return None
+
 
 # Global Slack client manager instance
 slack_client_manager = SlackClientManager()

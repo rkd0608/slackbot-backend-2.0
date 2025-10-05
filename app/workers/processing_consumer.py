@@ -53,13 +53,15 @@ class ProcessingConsumer(BaseConsumer):
                 channel_id = message.get("channel_id")
                 user_id = message.get("user_id")
                 team_id = message.get("team_id")
+                message_id = message.get("message_id")
 
                 await file_processor.process_file(
                     file_info,
                     channel_id,
                     user_id,
                     team_id,
-                    db
+                    db,
+                    message_id
                 )
 
                 return True
