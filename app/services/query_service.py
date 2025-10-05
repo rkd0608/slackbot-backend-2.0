@@ -42,15 +42,28 @@ class QueryService:
 
     def __init__(self):
         self.client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self.use_llm_entities = getattr(settings, 'enable_llm_entity_extraction', False)
 
     async def analyze_query(self, query_text: str) -> Dict[str, Any]:
         """Comprehensive query analysis"""
+
+        # Use GPT-4 based query analyzer if enabled
+        if getattr(settings, 'enable_llm_query_analysis', False):
+            from app.services.query_analyzer import query_analyzer
+            return await query_analyzer.analyze(query_text)
+
+        # Fallback to regex-based analysis
+        # Use LLM for entity extraction if enabled
+        if self.use_llm_entities:
+            entities = await self._extract_entities_llm(query_text)
+        else:
+            entities = self._extract_entities(query_text)
 
         analysis = {
             "original_query": query_text,
             "normalized_query": self._normalize_query(query_text),
             "intents": self._classify_intent(query_text),
-            "entities": self._extract_entities(query_text),
+            "entities": entities,
             "temporal": self._extract_temporal(query_text),
             "channels": self._extract_channels(query_text),
             "users": self._extract_user_mentions(query_text),
@@ -280,6 +293,53 @@ class QueryService:
             expansions.append(without_qwords)
 
         return list(set(expansions))
+
+    async def _extract_entities_llm(self, query: str) -> List[Dict[str, str]]:
+        """
+        Use LLM to extract entities with better accuracy
+        Falls back to regex-based extraction if LLM fails
+        """
+        try:
+            response = await self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """Extract named entities from Slack workspace queries.
+
+Categories:
+- person: Names of people (@john, John Doe)
+- channel: Slack channels (#engineering, engineering channel)
+- project: Project names (Project Apollo, Q2 Dashboard)
+- technology: Technical terms (Redis, Kubernetes, API)
+- ticket: JIRA tickets (PROJ-123)
+- temporal: Time references (last week, yesterday)
+- file: File references (HTML file, config.yaml)
+
+Return JSON with "entities" array: {"entities": [{"text": "Redis", "type": "technology"}, ...]}
+Return {"entities": []} if no entities found."""
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Query: {query}\n\nExtract entities as JSON:"
+                    }
+                ],
+                temperature=0,
+                max_tokens=200,
+                response_format={"type": "json_object"}
+            )
+
+            import json
+            result = json.loads(response.choices[0].message.content)
+            entities = result.get("entities", [])
+
+            logger.info("llm_entity_extraction", query=query, count=len(entities))
+            return entities
+
+        except Exception as e:
+            logger.error("llm_entity_extraction_error", error=str(e))
+            # Fall back to regex
+            return self._extract_entities(query)
 
 
 # Global query service instance

@@ -54,6 +54,8 @@ class EventConsumer(BaseConsumer):
 
             if event_type == "message":
                 success = loop.run_until_complete(self._handle_message_event(event, team_id))
+            elif event_type == "app_mention":
+                success = loop.run_until_complete(self._handle_app_mention(event, team_id))
             elif event_type == "message_changed":
                 success = loop.run_until_complete(self._handle_message_changed(event, team_id))
             elif event_type == "message_deleted":
@@ -88,21 +90,65 @@ class EventConsumer(BaseConsumer):
         """Handle new message event"""
         async with db_manager.AsyncSessionLocal() as db:
             try:
-                # Skip bot messages if needed
-                if event.get("subtype") == "bot_message":
-                    # Could process bot messages separately or skip
-                    pass
+                # Skip bot messages to avoid infinite loops
+                if event.get("subtype") == "bot_message" or event.get("bot_id"):
+                    logger.info("skipping_bot_message", bot_id=event.get("bot_id"))
+                    return True
 
-                # Process the message
+                # Check if this is a DM (message.im event will have channel_type = 'im')
+                channel_type = event.get("channel_type")
+                if channel_type == "im":
+                    # Handle as DM to bot
+                    from app.services.bot_interaction import bot_interaction_service
+                    await bot_interaction_service.handle_message_event(event, db)
+                    return True
+
+                # Process the message normally
                 message = await message_processor.process_message_event(event, team_id, db)
 
                 # If this is a thread parent, create thread record
                 if message and message.is_thread_parent:
                     await self._create_thread_record(message, db)
 
+                # If message has files, queue them for processing
+                if message and message.has_files and message.file_ids:
+                    files = event.get("files", [])
+                    for file_info in files:
+                        queue_manager.publish(
+                            queue=queue_manager.PROCESSING_QUEUE,
+                            message={
+                                "type": "file_processing",
+                                "file_id": file_info.get("id"),
+                                "file_info": file_info,
+                                "channel_id": event.get("channel"),
+                                "user_id": event.get("user"),
+                                "team_id": team_id,
+                                "message_id": message.message_id
+                            }
+                        )
+                        logger.info("file_queued_from_message", file_id=file_info.get("id"), message_id=message.message_id)
+
                 return True
             except Exception as e:
                 logger.error("handle_message_error", error=str(e))
+                return False
+
+    async def _handle_app_mention(self, event: Dict[str, Any], team_id: str) -> bool:
+        """Handle app mention event - bot is mentioned in a channel"""
+        async with db_manager.AsyncSessionLocal() as db:
+            try:
+                from app.services.bot_interaction import bot_interaction_service
+
+                # First, process and store the message
+                message = await message_processor.process_message_event(event, team_id, db)
+
+                # Then handle bot interaction
+                await bot_interaction_service.handle_message_event(event, db)
+
+                logger.info("app_mention_handled", user=event.get("user"), channel=event.get("channel"))
+                return True
+            except Exception as e:
+                logger.error("handle_app_mention_error", error=str(e))
                 return False
 
     async def _handle_message_changed(self, event: Dict[str, Any], team_id: str) -> bool:
@@ -254,16 +300,39 @@ class EventConsumer(BaseConsumer):
     async def _handle_member_joined(self, event: Dict[str, Any], team_id: str) -> bool:
         """Handle member joined channel"""
         try:
-            queue_manager.publish(
-                queue=queue_manager.PROCESSING_QUEUE,
-                message={
-                    "type": "member_sync",
-                    "channel_id": event.get("channel"),
-                    "user_id": event.get("user"),
-                    "team_id": team_id,
-                    "action": "joined"
-                }
-            )
+            from app.core.config import settings
+
+            channel_id = event.get("channel")
+            user_id = event.get("user")
+
+            # Check if the bot itself joined the channel
+            if user_id == settings.slack_bot_user_id:
+                # Trigger backfill for this channel
+                logger.info(
+                    "bot_joined_channel_triggering_backfill",
+                    channel_id=channel_id,
+                    user_id=user_id
+                )
+                queue_manager.publish(
+                    queue=queue_manager.PROCESSING_QUEUE,
+                    message={
+                        "type": "channel_backfill",
+                        "channel_id": channel_id,
+                        "team_id": team_id
+                    }
+                )
+            else:
+                # Regular member joined - just sync members
+                queue_manager.publish(
+                    queue=queue_manager.PROCESSING_QUEUE,
+                    message={
+                        "type": "member_sync",
+                        "channel_id": channel_id,
+                        "user_id": user_id,
+                        "team_id": team_id,
+                        "action": "joined"
+                    }
+                )
             return True
         except Exception as e:
             logger.error("handle_member_joined_error", error=str(e))
@@ -272,16 +341,39 @@ class EventConsumer(BaseConsumer):
     async def _handle_member_left(self, event: Dict[str, Any], team_id: str) -> bool:
         """Handle member left channel"""
         try:
-            queue_manager.publish(
-                queue=queue_manager.PROCESSING_QUEUE,
-                message={
-                    "type": "member_sync",
-                    "channel_id": event.get("channel"),
-                    "user_id": event.get("user"),
-                    "team_id": team_id,
-                    "action": "left"
-                }
-            )
+            from app.core.config import settings
+
+            channel_id = event.get("channel")
+            user_id = event.get("user")
+
+            # Check if the bot itself was removed from the channel
+            if user_id == settings.slack_bot_user_id:
+                # Bot was removed - archive the channel
+                logger.info(
+                    "bot_removed_from_channel_archiving",
+                    channel_id=channel_id,
+                    user_id=user_id
+                )
+                queue_manager.publish(
+                    queue=queue_manager.PROCESSING_QUEUE,
+                    message={
+                        "type": "channel_archive",
+                        "channel_id": channel_id,
+                        "team_id": team_id
+                    }
+                )
+            else:
+                # Regular member left - just sync members
+                queue_manager.publish(
+                    queue=queue_manager.PROCESSING_QUEUE,
+                    message={
+                        "type": "member_sync",
+                        "channel_id": channel_id,
+                        "user_id": user_id,
+                        "team_id": team_id,
+                        "action": "left"
+                    }
+                )
             return True
         except Exception as e:
             logger.error("handle_member_left_error", error=str(e))

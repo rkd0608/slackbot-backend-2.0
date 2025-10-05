@@ -12,10 +12,14 @@ logger = get_logger(__name__)
 async def main():
     """Run event consumer"""
     from app.core.queue import queue_manager
+    from app.services.slack_client import slack_client_manager
+    from app.core.vector_db import vector_db_manager
 
     db_manager.initialize()
     await cache_manager.initialize()
     queue_manager.initialize()  # Initialize queue_manager for publishing
+    slack_client_manager.initialize()  # Initialize Slack client for bot interactions
+    vector_db_manager.initialize()  # Initialize Pinecone for retrieval
 
     try:
         event_consumer.connect()
