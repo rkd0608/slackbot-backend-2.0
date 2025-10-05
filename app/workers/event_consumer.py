@@ -341,16 +341,39 @@ class EventConsumer(BaseConsumer):
     async def _handle_member_left(self, event: Dict[str, Any], team_id: str) -> bool:
         """Handle member left channel"""
         try:
-            queue_manager.publish(
-                queue=queue_manager.PROCESSING_QUEUE,
-                message={
-                    "type": "member_sync",
-                    "channel_id": event.get("channel"),
-                    "user_id": event.get("user"),
-                    "team_id": team_id,
-                    "action": "left"
-                }
-            )
+            from app.core.config import settings
+
+            channel_id = event.get("channel")
+            user_id = event.get("user")
+
+            # Check if the bot itself was removed from the channel
+            if user_id == settings.slack_bot_user_id:
+                # Bot was removed - archive the channel
+                logger.info(
+                    "bot_removed_from_channel_archiving",
+                    channel_id=channel_id,
+                    user_id=user_id
+                )
+                queue_manager.publish(
+                    queue=queue_manager.PROCESSING_QUEUE,
+                    message={
+                        "type": "channel_archive",
+                        "channel_id": channel_id,
+                        "team_id": team_id
+                    }
+                )
+            else:
+                # Regular member left - just sync members
+                queue_manager.publish(
+                    queue=queue_manager.PROCESSING_QUEUE,
+                    message={
+                        "type": "member_sync",
+                        "channel_id": channel_id,
+                        "user_id": user_id,
+                        "team_id": team_id,
+                        "action": "left"
+                    }
+                )
             return True
         except Exception as e:
             logger.error("handle_member_left_error", error=str(e))
