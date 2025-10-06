@@ -60,14 +60,18 @@ class CitationService:
         formatted = []
 
         for citation in citations:
-            # Try to find matching message in context
-            message_link = self._find_message_link(citation, thread_contexts)
+            # Try to find matching message in context and extract channel_id
+            message_link, channel_id = self._find_message_link(citation, thread_contexts)
 
             formatted.append({
                 "number": citation["number"],
                 "channel": citation["channel"],
                 "user": citation["user"],
+                "channel_name": citation["channel"].lstrip('#'),  # For response formatter
+                "user_name": citation["user"].lstrip('@'),  # For response formatter
+                "channel_id": channel_id,  # For proper Slack channel reference
                 "timestamp": citation["timestamp"],
+                "url": message_link,
                 "link": message_link,
                 "text": self._format_citation_text(citation, message_link)
             })
@@ -78,8 +82,8 @@ class CitationService:
         self,
         citation: Dict[str, Any],
         thread_contexts: List[Dict[str, Any]]
-    ) -> str:
-        """Find Slack deep link for cited message"""
+    ) -> Tuple[str, str]:
+        """Find Slack deep link for cited message and return (link, channel_id)"""
 
         channel_name = citation["channel"].lstrip('#')
         user_name = citation["user"].lstrip('@')
@@ -90,22 +94,27 @@ class CitationService:
             if thread_ctx.get("channel_name") != channel_name:
                 continue
 
+            channel_id = thread_ctx.get("channel_id", "")
+
             for message in thread_ctx.get("messages", []):
                 # Match by user and approximate timestamp
                 if (message.get("user_name") == user_name and
                     timestamp_str in message.get("timestamp", "")):
 
                     # Generate Slack deep link
-                    channel_id = thread_ctx.get("channel_id", "")
                     message_id = message.get("message_id", "")
 
                     if channel_id and message_id:
                         # Convert timestamp format for URL
                         message_ts = message_id.replace(".", "")
-                        return f"https://slack.com/archives/{channel_id}/p{message_ts}"
+                        return (f"https://slack.com/archives/{channel_id}/p{message_ts}", channel_id)
 
-        # Fallback: generic channel link
-        return f"https://slack.com/app_redirect?channel={channel_name}"
+            # If we found the channel but not the exact message, return channel info
+            if channel_id:
+                return (f"https://slack.com/app_redirect?channel={channel_id}", channel_id)
+
+        # Fallback: generic channel link without ID
+        return (f"https://slack.com/app_redirect?channel={channel_name}", "")
 
     def _format_citation_text(self, citation: Dict[str, Any], link: str) -> str:
         """Format citation as readable text"""

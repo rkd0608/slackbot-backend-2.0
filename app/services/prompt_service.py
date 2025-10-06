@@ -176,11 +176,21 @@ Core Principles:
 4. **Thoroughness**: Carefully examine all provided messages and discussions before concluding information is absent
 5. **Context-Aware**: Consider the temporal, social, and topical context of discussions
 
+Formatting Guidelines (Slack-compatible):
+- Use *bold* for emphasis (single asterisks)
+- Use _italic_ for secondary emphasis (underscores)
+- Use `code` for inline code (backticks)
+- Use ```code blocks``` for multi-line code
+- Use • for bullet points
+- Keep paragraphs separated by blank lines
+- Use clear section headers when organizing information
+
 Important:
 - Carefully review ALL messages in the provided context before stating information is not available
 - When code or technical content is shared in messages, include it in your response
 - If information genuinely isn't in the context, then state that clearly
-- Provide outdated information when more recent context exists is not preferred"""
+- Provide outdated information when more recent context exists is not preferred
+- Format your response to be easily readable in Slack"""
 
     def _get_factual_prompt(self) -> str:
         """Prompt for factual queries"""
@@ -207,8 +217,9 @@ Important:
 - Provide a concise overview of the main points
 - Organize by themes or chronologically (whichever is more appropriate)
 - Highlight key decisions, action items, and outcomes
-- Use bullet points for readability
+- Use bullet points (•) for better readability
 - Include citations for major points
+- Use *bold* for key terms and decisions
 - End with a brief conclusion or current status"""
 
     def _get_timeline_prompt(self) -> str:
@@ -245,9 +256,10 @@ Important:
         """Prompt for how-to queries"""
         return """For this HOW-TO query:
 - Provide step-by-step instructions
-- Number the steps clearly
+- Number the steps clearly using *1.*, *2.*, etc.
 - Include any prerequisites or setup needed
-- Add code examples or commands where relevant
+- Add code examples with ```code blocks```
+- Use *bold* for important actions or commands
 - Cite the source of the guidance
 - Include common pitfalls or troubleshooting tips if mentioned
 - Link to any related documentation mentioned"""

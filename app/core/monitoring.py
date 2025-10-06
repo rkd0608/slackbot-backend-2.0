@@ -158,3 +158,85 @@ hallucination_detections = Counter(
     ['indicator_type'],
     registry=registry
 )
+
+# AI Quality Assurance Metrics (Phase 2.1)
+feedback_responses = Counter(
+    'feedback_responses_total',
+    'Total user feedback responses',
+    ['feedback_type'],  # thumbs_up, thumbs_down
+    registry=registry
+)
+
+feedback_rate = Gauge(
+    'feedback_rate',
+    'Percentage of queries that receive feedback',
+    registry=registry
+)
+
+avg_retrieval_score = Gauge(
+    'avg_retrieval_score',
+    'Average retrieval relevance score (top result)',
+    ['time_window'],  # 1h, 24h, 7d
+    registry=registry
+)
+
+query_rewrite_rate = Gauge(
+    'query_rewrite_rate',
+    'Percentage of queries that were rewritten',
+    registry=registry
+)
+
+query_expansion_rate = Gauge(
+    'query_expansion_rate',
+    'Percentage of queries that were expanded',
+    registry=registry
+)
+
+evaluation_pass_rate = Gauge(
+    'evaluation_pass_rate',
+    'Golden test evaluation pass rate',
+    ['category'],
+    registry=registry
+)
+
+evaluation_precision = Gauge(
+    'evaluation_precision_at_5',
+    'Average Precision@5 from latest evaluation',
+    ['category'],
+    registry=registry
+)
+
+evaluation_recall = Gauge(
+    'evaluation_recall_at_5',
+    'Average Recall@5 from latest evaluation',
+    ['category'],
+    registry=registry
+)
+
+evaluation_mrr = Gauge(
+    'evaluation_mrr',
+    'Average MRR from latest evaluation',
+    ['category'],
+    registry=registry
+)
+
+evaluation_ndcg = Gauge(
+    'evaluation_ndcg_at_5',
+    'Average NDCG@5 from latest evaluation',
+    ['category'],
+    registry=registry
+)
+
+retrieval_no_results = Counter(
+    'retrieval_no_results_total',
+    'Queries that returned zero results',
+    ['query_type'],
+    registry=registry
+)
+
+retrieval_low_confidence = Counter(
+    'retrieval_low_confidence_total',
+    'Queries with top score below threshold',
+    ['threshold'],  # 0.3, 0.5, 0.7
+    registry=registry
+)

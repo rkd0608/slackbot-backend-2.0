@@ -1,5 +1,6 @@
 """Format responses for Slack Block Kit"""
 from typing import List, Dict, Any, Optional
+import re
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -9,20 +10,60 @@ class ResponseFormatter:
     """Formats bot responses for Slack using Block Kit"""
 
     @staticmethod
+    def convert_to_slack_markdown(text: str) -> str:
+        """Convert standard markdown to Slack mrkdwn format"""
+
+        # Convert markdown headers (### Header) to *Header*
+        text = re.sub(r'^###\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+        text = re.sub(r'^##\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+        text = re.sub(r'^#\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+
+        # Convert **bold** to *bold*
+        text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+
+        # Convert __bold__ to *bold*
+        text = re.sub(r'__(.+?)__', r'*\1*', text)
+
+        # Convert *italic* to _italic_ (but not if already converted bold)
+        # This is tricky because * is used for bold in Slack
+        # We'll convert single asterisks that aren't part of bold to underscores
+        text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'_\1_', text)
+
+        # Convert `code` to `code` (already compatible)
+
+        # Convert ```code blocks``` to Slack format
+        text = re.sub(r'```(\w+)?\n(.+?)\n```', r'```\2```', text, flags=re.DOTALL)
+
+        # Convert [text](url) to <url|text>
+        text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<\2|\1>', text)
+
+        # Convert numbered lists to better formatting
+        text = re.sub(r'^(\d+)\.\s+', r'*\1.* ', text, flags=re.MULTILINE)
+
+        # Convert bullet points - fix spacing
+        text = re.sub(r'^[•\-]\s+', r'• ', text, flags=re.MULTILINE)
+
+        return text
+
+    @staticmethod
     def format_answer_response(
         answer: str,
         citations: List[Dict[str, Any]],
-        confidence: float = None
+        confidence: float = None,
+        query_id: str = None
     ) -> Dict[str, Any]:
         """Format LLM answer with citations as Slack blocks"""
         blocks = []
+
+        # Convert markdown to Slack format
+        formatted_answer = ResponseFormatter.convert_to_slack_markdown(answer)
 
         # Main answer text
         blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": answer
+                "text": formatted_answer
             }
         })
 
@@ -33,18 +74,25 @@ class ResponseFormatter:
             # Citations section
             citation_lines = []
             for idx, citation in enumerate(citations[:5], 1):  # Limit to 5 citations
-                channel = citation.get("channel_name", "unknown")
+                channel_name = citation.get("channel_name", "unknown")
+                channel_id = citation.get("channel_id", "")
                 user = citation.get("user_name", "unknown")
                 timestamp = citation.get("timestamp", "")
                 url = citation.get("url", "")
 
+                # Format channel reference - use ID if available, otherwise name
+                if channel_id:
+                    channel_ref = f"<#{channel_id}>"
+                else:
+                    channel_ref = f"#{channel_name}"
+
                 if url:
                     citation_lines.append(
-                        f"{idx}. <#{channel}> - @{user} - <{url}|View Message>"
+                        f"{idx}. {channel_ref} - @{user} - <{url}|View Message>"
                     )
                 else:
                     citation_lines.append(
-                        f"{idx}. <#{channel}> - @{user}"
+                        f"{idx}. {channel_ref} - @{user} - _{timestamp}_"
                     )
 
             blocks.append({
@@ -68,6 +116,36 @@ class ResponseFormatter:
                 ]
             })
 
+        # Add feedback buttons if query_id provided
+        if query_id:
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "actions",
+                "block_id": f"feedback_{query_id}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "👍 Helpful"
+                        },
+                        "style": "primary",
+                        "value": f"{query_id}:thumbs_up",
+                        "action_id": "feedback_thumbs_up"
+                    },
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "👎 Not Helpful"
+                        },
+                        "style": "danger",
+                        "value": f"{query_id}:thumbs_down",
+                        "action_id": "feedback_thumbs_down"
+                    }
+                ]
+            })
+
         return {
             "blocks": blocks,
             "text": answer  # Fallback text for notifications
@@ -86,28 +164,50 @@ class ResponseFormatter:
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"Search Results for: {query}\n\nFound {len(results)} relevant messages:"
+                "text": f"*Search Results for:* {query}\n\nFound {len(results)} relevant messages:"
             }
         })
 
         blocks.append({"type": "divider"})
 
-        # Results (limit to 10)
-        for idx, result in enumerate(results[:10], 1):
-            channel = result.get("channel_name", "unknown")
-            user = result.get("user_name", "unknown")
+        # Results (limit to 15 to avoid message being too long)
+        display_limit = min(15, len(results))
+        for idx, result in enumerate(results[:display_limit], 1):
+            # Get channel info
+            channel_name = result.get("channel_name") or result.get("channel", "unknown")
+            channel_id = result.get("channel_id", "")
+
+            # Get user info
+            user_name = result.get("user_name") or result.get("user", "unknown")
+
+            # Get message info
             text = result.get("text", "")
             timestamp = result.get("timestamp", "")
             score = result.get("score", 0)
-            url = result.get("url", "")
+            message_id = result.get("message_id", "")
+
+            # Format channel reference
+            if channel_id:
+                channel_ref = f"<#{channel_id}>"
+            else:
+                channel_ref = f"#{channel_name}"
+
+            # Build message URL if we have the required info
+            url = ""
+            if channel_id and message_id:
+                message_ts = message_id.replace(".", "")
+                url = f"https://slack.com/archives/{channel_id}/p{message_ts}"
 
             # Truncate text if too long
             if len(text) > 150:
                 text = text[:147] + "..."
 
-            result_text = f"{idx}. <#{channel}> - @{user}"
+            # Build result text
+            result_text = f"*{idx}.* {channel_ref} - @{user_name}"
             if url:
-                result_text += f" - <{url}|View>"
+                result_text += f" - <{url}|View Message>"
+            elif timestamp:
+                result_text += f" - _{timestamp}_"
 
             result_text += f"\n{text}"
 
@@ -120,13 +220,14 @@ class ResponseFormatter:
             })
 
         # Show more indicator if there are more results
-        if len(results) > 10:
+        if len(results) > display_limit:
+            remaining = len(results) - display_limit
             blocks.append({
                 "type": "context",
                 "elements": [
                     {
                         "type": "mrkdwn",
-                        "text": f"... and {len(results) - 10} more results"
+                        "text": f"_... and {remaining} more result{'s' if remaining > 1 else ''}_"
                     }
                 ]
             })

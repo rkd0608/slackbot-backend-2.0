@@ -71,7 +71,23 @@ services:
       timeout: 3s
       retries: 10
 
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_INSTALL_PLUGINS=
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+    depends_on:
+      - app
+
 volumes:
   mysql_data:
   redis_data:
   rabbitmq_data:
+  grafana_data:

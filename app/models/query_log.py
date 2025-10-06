@@ -36,6 +36,19 @@ class QueryLog(Base):
     results_count = Column(Integer, default=0)
     result_message_ids = Column(JSON, nullable=True)  # List of returned message IDs
 
+    # Enhanced retrieval metadata
+    retrieval_scores = Column(JSON, nullable=True)  # Scores for each result
+    retrieval_sources = Column(JSON, nullable=True)  # Source types (vector/keyword/entity)
+    top_result_score = Column(Float, nullable=True)  # Highest relevance score
+    avg_result_score = Column(Float, nullable=True)  # Average score across top results
+
+    # Query enhancement tracking
+    original_query = Column(Text, nullable=True)  # Query before rewriting
+    rewritten_query = Column(Text, nullable=True)  # Query after rewriting
+    expanded_queries = Column(JSON, nullable=True)  # Query expansion variants
+    query_was_rewritten = Column(Integer, default=0)  # Boolean flag
+    query_was_expanded = Column(Integer, default=0)  # Boolean flag
+
     # Performance metrics
     retrieval_latency_ms = Column(Integer, nullable=True)
     reranking_latency_ms = Column(Integer, nullable=True)
