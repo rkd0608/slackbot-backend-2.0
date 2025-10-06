@@ -1,5 +1,6 @@
 """Format responses for Slack Block Kit"""
 from typing import List, Dict, Any, Optional
+import re
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -7,6 +8,42 @@ logger = get_logger(__name__)
 
 class ResponseFormatter:
     """Formats bot responses for Slack using Block Kit"""
+
+    @staticmethod
+    def convert_to_slack_markdown(text: str) -> str:
+        """Convert standard markdown to Slack mrkdwn format"""
+
+        # Convert markdown headers (### Header) to *Header*
+        text = re.sub(r'^###\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+        text = re.sub(r'^##\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+        text = re.sub(r'^#\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+
+        # Convert **bold** to *bold*
+        text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+
+        # Convert __bold__ to *bold*
+        text = re.sub(r'__(.+?)__', r'*\1*', text)
+
+        # Convert *italic* to _italic_ (but not if already converted bold)
+        # This is tricky because * is used for bold in Slack
+        # We'll convert single asterisks that aren't part of bold to underscores
+        text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'_\1_', text)
+
+        # Convert `code` to `code` (already compatible)
+
+        # Convert ```code blocks``` to Slack format
+        text = re.sub(r'```(\w+)?\n(.+?)\n```', r'```\2```', text, flags=re.DOTALL)
+
+        # Convert [text](url) to <url|text>
+        text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<\2|\1>', text)
+
+        # Convert numbered lists to better formatting
+        text = re.sub(r'^(\d+)\.\s+', r'*\1.* ', text, flags=re.MULTILINE)
+
+        # Convert bullet points - fix spacing
+        text = re.sub(r'^[•\-]\s+', r'• ', text, flags=re.MULTILINE)
+
+        return text
 
     @staticmethod
     def format_answer_response(
@@ -18,12 +55,15 @@ class ResponseFormatter:
         """Format LLM answer with citations as Slack blocks"""
         blocks = []
 
+        # Convert markdown to Slack format
+        formatted_answer = ResponseFormatter.convert_to_slack_markdown(answer)
+
         # Main answer text
         blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": answer
+                "text": formatted_answer
             }
         })
 
@@ -34,18 +74,25 @@ class ResponseFormatter:
             # Citations section
             citation_lines = []
             for idx, citation in enumerate(citations[:5], 1):  # Limit to 5 citations
-                channel = citation.get("channel_name", "unknown")
+                channel_name = citation.get("channel_name", "unknown")
+                channel_id = citation.get("channel_id", "")
                 user = citation.get("user_name", "unknown")
                 timestamp = citation.get("timestamp", "")
                 url = citation.get("url", "")
 
+                # Format channel reference - use ID if available, otherwise name
+                if channel_id:
+                    channel_ref = f"<#{channel_id}>"
+                else:
+                    channel_ref = f"#{channel_name}"
+
                 if url:
                     citation_lines.append(
-                        f"{idx}. <#{channel}> - @{user} - <{url}|View Message>"
+                        f"{idx}. {channel_ref} - @{user} - <{url}|View Message>"
                     )
                 else:
                     citation_lines.append(
-                        f"{idx}. <#{channel}> - @{user}"
+                        f"{idx}. {channel_ref} - @{user} - _{timestamp}_"
                     )
 
             blocks.append({
