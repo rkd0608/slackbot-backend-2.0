@@ -12,7 +12,8 @@ class ResponseFormatter:
     def format_answer_response(
         answer: str,
         citations: List[Dict[str, Any]],
-        confidence: float = None
+        confidence: float = None,
+        query_id: str = None
     ) -> Dict[str, Any]:
         """Format LLM answer with citations as Slack blocks"""
         blocks = []
@@ -64,6 +65,36 @@ class ResponseFormatter:
                     {
                         "type": "mrkdwn",
                         "text": confidence_text
+                    }
+                ]
+            })
+
+        # Add feedback buttons if query_id provided
+        if query_id:
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "actions",
+                "block_id": f"feedback_{query_id}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "👍 Helpful"
+                        },
+                        "style": "primary",
+                        "value": f"{query_id}:thumbs_up",
+                        "action_id": "feedback_thumbs_up"
+                    },
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "👎 Not Helpful"
+                        },
+                        "style": "danger",
+                        "value": f"{query_id}:thumbs_down",
+                        "action_id": "feedback_thumbs_down"
                     }
                 ]
             })

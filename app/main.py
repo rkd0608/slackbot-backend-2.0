@@ -21,7 +21,7 @@ from app.core.exceptions import (
     PermissionException
 )
 
-from app.api import health, events, admin, query, answer, commands
+from app.api import health, events, admin, query, answer, commands, interactions, evaluation
 
 # Setup logging
 setup_logging()
@@ -42,6 +42,10 @@ async def lifespan(app: FastAPI):
         vector_db_manager.initialize()
         storage_manager.initialize()
         slack_client_manager.initialize()
+
+        # Start metrics updater background task
+        from app.services.metrics_updater import start_metrics_updater
+        await start_metrics_updater()
 
         logger.info("application_started")
         yield
@@ -102,6 +106,8 @@ async def base_exception_handler(request: Request, exc: SlackIntelligenceExcepti
 app.include_router(health.router, prefix="/api/v1", tags=["health"])
 app.include_router(events.router, prefix="/api/v1", tags=["events"])
 app.include_router(commands.router, prefix="/api/v1", tags=["commands"])
+app.include_router(interactions.router, prefix="/api/v1", tags=["interactions"])
+app.include_router(evaluation.router, prefix="/api/v1", tags=["evaluation"])
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 app.include_router(query.router, prefix="/api/v1", tags=["query"])
 app.include_router(answer.router, prefix="/api/v1", tags=["answer"])

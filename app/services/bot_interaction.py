@@ -12,6 +12,8 @@ from app.services.context_service import context_service
 from app.services.prompt_service import prompt_service
 from app.services.citation_service import citation_service
 from app.core.logging import get_logger
+from app.core.monitoring import retrieval_no_results, retrieval_low_confidence
+import uuid
 
 logger = get_logger(__name__)
 
@@ -30,6 +32,9 @@ class BotInteractionService:
     ) -> bool:
         """Handle ask query - generate AI answer with citations"""
         try:
+            # Generate query_id for feedback tracking
+            query_id = str(uuid.uuid4())
+
             # Add eyes reaction to show bot is processing
             await slack_client_manager.add_reaction(
                 channel=channel,
@@ -51,11 +56,13 @@ class BotInteractionService:
                 )
 
             # Step 2: Rewrite query with conversation context
+            original_query = query
             rewritten_query = await query_rewriter.rewrite_query(
                 query=query,
                 conversation_id=conversation_id,
                 db=db
             )
+            query_was_rewritten = (rewritten_query != original_query)
 
             # Refresh conversation after rewriting
             if not conversation:
@@ -74,6 +81,12 @@ class BotInteractionService:
                 db=db,
                 top_k=10
             )
+
+            # Extract retrieval metadata
+            retrieval_metadata = self._extract_retrieval_metadata(retrieval_results)
+
+            # Track retrieval quality metrics
+            self._track_retrieval_metrics(retrieval_results, analysis)
 
             # Step 5: Get conversation history
             conversation_history = []
@@ -133,11 +146,12 @@ class BotInteractionService:
                 db=db
             )
 
-            # Step 9: Format response for Slack
+            # Step 9: Format response for Slack with feedback buttons
             formatted_response = response_formatter.format_answer_response(
                 answer=processed_answer,
                 citations=formatted_citations,
-                confidence=None
+                confidence=None,
+                query_id=query_id
             )
 
             # Step 10: Post response
@@ -148,11 +162,26 @@ class BotInteractionService:
                 thread_ts=thread_ts
             )
 
+            # Step 11: Log query with enhanced metadata
+            await self._log_query(
+                query_id=query_id,
+                user_id=user_id,
+                original_query=original_query,
+                rewritten_query=rewritten_query if query_was_rewritten else None,
+                query_was_rewritten=query_was_rewritten,
+                analysis=analysis,
+                retrieval_metadata=retrieval_metadata,
+                response=processed_answer,
+                citations=formatted_citations,
+                db=db
+            )
+
             logger.info(
                 "ask_query_handled",
                 user_id=user_id,
                 channel=channel,
-                conversation_id=conversation_id
+                conversation_id=conversation_id,
+                query_id=query_id
             )
             return True
 
@@ -289,6 +318,91 @@ class BotInteractionService:
         except Exception as e:
             logger.error("handle_message_event_error", error=str(e))
             return False
+
+    def _extract_retrieval_metadata(self, retrieval_results: list) -> dict:
+        """Extract metadata from retrieval results for logging"""
+        if not retrieval_results:
+            return {
+                "scores": [],
+                "sources": [],
+                "top_score": None,
+                "avg_score": None
+            }
+
+        scores = [r.get("score", 0) for r in retrieval_results]
+        sources = [r.get("source", "unknown") for r in retrieval_results]
+
+        return {
+            "scores": scores,
+            "sources": sources,
+            "top_score": max(scores) if scores else None,
+            "avg_score": sum(scores) / len(scores) if scores else None
+        }
+
+    def _track_retrieval_metrics(self, retrieval_results: list, analysis: dict):
+        """Track retrieval quality metrics in Prometheus"""
+        query_type = analysis.get("query_type", "unknown")
+
+        # Track no results
+        if not retrieval_results:
+            retrieval_no_results.labels(query_type=query_type).inc()
+            return
+
+        # Track low confidence
+        top_score = retrieval_results[0].get("score", 0) if retrieval_results else 0
+
+        if top_score < 0.3:
+            retrieval_low_confidence.labels(threshold="0.3").inc()
+        if top_score < 0.5:
+            retrieval_low_confidence.labels(threshold="0.5").inc()
+        if top_score < 0.7:
+            retrieval_low_confidence.labels(threshold="0.7").inc()
+
+    async def _log_query(
+        self,
+        query_id: str,
+        user_id: str,
+        original_query: str,
+        rewritten_query: str,
+        query_was_rewritten: bool,
+        analysis: dict,
+        retrieval_metadata: dict,
+        response: str,
+        citations: list,
+        db: AsyncSession
+    ):
+        """Log query with enhanced metadata"""
+        from app.models.query_log import QueryLog
+
+        try:
+            query_log = QueryLog(
+                query_id=query_id,
+                user_id=user_id,
+                query_text=rewritten_query or original_query,
+                original_query=original_query,
+                rewritten_query=rewritten_query,
+                query_was_rewritten=1 if query_was_rewritten else 0,
+                intent_type=analysis.get("query_type"),
+                entities_extracted=analysis.get("entities"),
+                channel_filters=analysis.get("channels"),
+                results_count=len(citations),
+                result_message_ids=[c.get("message_id") for c in citations if c.get("message_id")],
+                retrieval_scores=retrieval_metadata.get("scores"),
+                retrieval_sources=retrieval_metadata.get("sources"),
+                top_result_score=retrieval_metadata.get("top_score"),
+                avg_result_score=retrieval_metadata.get("avg_score"),
+                response_text=response,
+                citations=citations
+            )
+
+            db.add(query_log)
+            await db.commit()
+
+            logger.info("query_logged", query_id=query_id, user_id=user_id)
+
+        except Exception as e:
+            logger.error("query_log_error", error=str(e), query_id=query_id)
+            await db.rollback()
 
 
 # Global bot interaction service instance

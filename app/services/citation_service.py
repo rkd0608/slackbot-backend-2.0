@@ -67,7 +67,10 @@ class CitationService:
                 "number": citation["number"],
                 "channel": citation["channel"],
                 "user": citation["user"],
+                "channel_name": citation["channel"].lstrip('#'),  # For response formatter
+                "user_name": citation["user"].lstrip('@'),  # For response formatter
                 "timestamp": citation["timestamp"],
+                "url": message_link,
                 "link": message_link,
                 "text": self._format_citation_text(citation, message_link)
             })
