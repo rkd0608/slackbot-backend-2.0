@@ -164,28 +164,50 @@ class ResponseFormatter:
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"Search Results for: {query}\n\nFound {len(results)} relevant messages:"
+                "text": f"*Search Results for:* {query}\n\nFound {len(results)} relevant messages:"
             }
         })
 
         blocks.append({"type": "divider"})
 
-        # Results (limit to 10)
-        for idx, result in enumerate(results[:10], 1):
-            channel = result.get("channel_name", "unknown")
-            user = result.get("user_name", "unknown")
+        # Results (limit to 15 to avoid message being too long)
+        display_limit = min(15, len(results))
+        for idx, result in enumerate(results[:display_limit], 1):
+            # Get channel info
+            channel_name = result.get("channel_name") or result.get("channel", "unknown")
+            channel_id = result.get("channel_id", "")
+
+            # Get user info
+            user_name = result.get("user_name") or result.get("user", "unknown")
+
+            # Get message info
             text = result.get("text", "")
             timestamp = result.get("timestamp", "")
             score = result.get("score", 0)
-            url = result.get("url", "")
+            message_id = result.get("message_id", "")
+
+            # Format channel reference
+            if channel_id:
+                channel_ref = f"<#{channel_id}>"
+            else:
+                channel_ref = f"#{channel_name}"
+
+            # Build message URL if we have the required info
+            url = ""
+            if channel_id and message_id:
+                message_ts = message_id.replace(".", "")
+                url = f"https://slack.com/archives/{channel_id}/p{message_ts}"
 
             # Truncate text if too long
             if len(text) > 150:
                 text = text[:147] + "..."
 
-            result_text = f"{idx}. <#{channel}> - @{user}"
+            # Build result text
+            result_text = f"*{idx}.* {channel_ref} - @{user_name}"
             if url:
-                result_text += f" - <{url}|View>"
+                result_text += f" - <{url}|View Message>"
+            elif timestamp:
+                result_text += f" - _{timestamp}_"
 
             result_text += f"\n{text}"
 
@@ -198,13 +220,14 @@ class ResponseFormatter:
             })
 
         # Show more indicator if there are more results
-        if len(results) > 10:
+        if len(results) > display_limit:
+            remaining = len(results) - display_limit
             blocks.append({
                 "type": "context",
                 "elements": [
                     {
                         "type": "mrkdwn",
-                        "text": f"... and {len(results) - 10} more results"
+                        "text": f"_... and {remaining} more result{'s' if remaining > 1 else ''}_"
                     }
                 ]
             })

@@ -96,7 +96,10 @@ class RetrievalService:
         else:
             final_results = candidates[:top_k]
 
-        return final_results
+        # Stage 4: Hydrate results with human-readable names
+        hydrated_results = await self._hydrate_results(final_results, db)
+
+        return hydrated_results
 
     async def _parallel_retrieval(
         self,
@@ -568,6 +571,57 @@ class RetrievalService:
         rewritten = ' '.join(rewritten.split())
 
         return rewritten if rewritten else query
+
+    async def _hydrate_results(
+        self,
+        results: List[Dict[str, Any]],
+        db: AsyncSession
+    ) -> List[Dict[str, Any]]:
+        """Hydrate results with channel names, user names, and message text"""
+        from sqlalchemy import select
+        from app.models.message import Message
+
+        # Extract message IDs
+        message_ids = [r.get("message_id") for r in results if r.get("message_id")]
+
+        if not message_ids:
+            return results
+
+        # Fetch messages from database in one query
+        stmt = select(Message).where(Message.message_id.in_(message_ids))
+        result = await db.execute(stmt)
+        messages_db = result.scalars().all()
+
+        # Create lookup map
+        message_map = {msg.message_id: msg for msg in messages_db}
+
+        # Hydrate results
+        hydrated = []
+        for result in results:
+            msg_id = result.get("message_id")
+            msg_db = message_map.get(msg_id)
+
+            if msg_db:
+                # Add all the human-readable fields
+                result["channel_name"] = msg_db.channel_name
+                result["channel_id"] = msg_db.channel_id
+                result["user_name"] = msg_db.user_name
+                result["user_id"] = msg_db.user_id
+                result["text"] = msg_db.text
+                result["timestamp"] = msg_db.timestamp.isoformat() if msg_db.timestamp else ""
+            else:
+                # Fallback to metadata if available
+                metadata = result.get("metadata", {})
+                result["channel_name"] = metadata.get("channel_name", "unknown")
+                result["channel_id"] = metadata.get("channel_id", "")
+                result["user_name"] = metadata.get("user_name", "unknown")
+                result["user_id"] = metadata.get("user_id", "")
+                result["text"] = metadata.get("text", "")
+                result["timestamp"] = metadata.get("timestamp", "")
+
+            hydrated.append(result)
+
+        return hydrated
 
 
 # Global retrieval service instance
