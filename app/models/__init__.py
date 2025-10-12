@@ -7,6 +7,8 @@ from app.models.entity import Entity, EntityRelationship
 from app.models.file import File
 from app.models.query_log import QueryLog
 from app.models.conversation import Conversation
+from app.models.workspace import Workspace, InstallationLog
+from app.models.user_expertise import UserExpertise, SignificantEvent
 
 __all__ = [
     "Message",
@@ -17,5 +19,9 @@ __all__ = [
     "EntityRelationship",
     "File",
     "QueryLog",
-    "Conversation"
+    "Conversation",
+    "Workspace",
+    "InstallationLog",
+    "UserExpertise",
+    "SignificantEvent"
 ]

@@ -1,10 +1,8 @@
-"""RabbitMQ message queue management"""
+"""RabbitMQ message queue management with aio-pika"""
 import json
-import time
-from typing import Optional, Callable, Any
-import pika
-from pika.adapters.asyncio_connection import AsyncioConnection
-from pika.exchange_type import ExchangeType
+from typing import Optional
+import aio_pika
+from aio_pika import ExchangeType
 from app.core.config import settings
 from app.core.logging import get_logger
 
@@ -12,7 +10,7 @@ logger = get_logger(__name__)
 
 
 class QueueManager:
-    """Manages RabbitMQ connections and message publishing"""
+    """Manages async RabbitMQ connections and message publishing"""
 
     # Queue names
     EVENTS_QUEUE = "slack.events"
@@ -24,105 +22,103 @@ class QueueManager:
     EVENTS_EXCHANGE = "slack.events.exchange"
 
     def __init__(self):
-        self.connection: Optional[pika.BlockingConnection] = None
-        self.channel: Optional[pika.channel.Channel] = None
+        self.connection: Optional[aio_pika.RobustConnection] = None
+        self.channel: Optional[aio_pika.Channel] = None
+        self.exchange: Optional[aio_pika.Exchange] = None
+        self._initialized = False
 
-    def initialize(self):
-        """Initialize RabbitMQ connection with retry logic"""
-        parameters = pika.ConnectionParameters(
-            host=settings.rabbitmq_host,
-            port=settings.rabbitmq_port,
-            virtual_host=settings.rabbitmq_vhost,
-            credentials=pika.PlainCredentials(
-                settings.rabbitmq_user,
-                settings.rabbitmq_password
-            ),
-            heartbeat=600,
-            blocked_connection_timeout=300
+    async def initialize(self):
+        """Initialize async RabbitMQ connection with retry logic"""
+        if self._initialized:
+            return
+
+        # Build connection URL
+        rabbitmq_url = (
+            f"amqp://{settings.rabbitmq_user}:{settings.rabbitmq_password}"
+            f"@{settings.rabbitmq_host}:{settings.rabbitmq_port}/{settings.rabbitmq_vhost}"
         )
 
-        # Retry logic for RabbitMQ connection
-        max_retries = 5
-        retry_delay = 2  # seconds
+        try:
+            logger.info("rabbitmq_connection_attempt", host=settings.rabbitmq_host)
 
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"rabbitmq_connection_attempt", attempt=attempt + 1, host=settings.rabbitmq_host)
-                self.connection = pika.BlockingConnection(parameters)
-                self.channel = self.connection.channel()
-                break
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        "rabbitmq_connection_failed_retrying",
-                        attempt=attempt + 1,
-                        error=str(e),
-                        retry_in=retry_delay
-                    )
-                    time.sleep(retry_delay)
-                else:
-                    logger.error("rabbitmq_connection_failed", error=str(e))
-                    raise
+            # Create robust connection (auto-reconnect on failure)
+            self.connection = await aio_pika.connect_robust(
+                rabbitmq_url,
+                heartbeat=600,
+                timeout=30
+            )
 
-        # Declare exchanges
-        self.channel.exchange_declare(
-            exchange=self.EVENTS_EXCHANGE,
-            exchange_type=ExchangeType.topic,
-            durable=True
-        )
+            self.channel = await self.connection.channel()
 
-        # Declare queues
-        self._declare_queue(self.EVENTS_QUEUE)
-        self._declare_queue(self.EMBEDDINGS_QUEUE)
-        self._declare_queue(self.PROCESSING_QUEUE)
-        self._declare_queue(self.DLQ_QUEUE)
+            # Set QoS - prefetch 10 messages at a time
+            await self.channel.set_qos(prefetch_count=10)
 
-        # Bind queues to exchange
-        self.channel.queue_bind(
-            exchange=self.EVENTS_EXCHANGE,
-            queue=self.EVENTS_QUEUE,
-            routing_key="slack.event.*"
-        )
+            # Declare exchanges
+            self.exchange = await self.channel.declare_exchange(
+                name=self.EVENTS_EXCHANGE,
+                type=ExchangeType.TOPIC,
+                durable=True
+            )
 
-        logger.info("queue_initialized", rabbitmq_host=settings.rabbitmq_host)
+            # Declare queues
+            await self._declare_queue(self.EVENTS_QUEUE)
+            await self._declare_queue(self.EMBEDDINGS_QUEUE)
+            await self._declare_queue(self.PROCESSING_QUEUE)
+            await self._declare_queue(self.DLQ_QUEUE)
 
-    def _declare_queue(self, queue_name: str):
+            # Bind events queue to exchange
+            events_queue = await self.channel.get_queue(self.EVENTS_QUEUE)
+            await events_queue.bind(
+                exchange=self.exchange,
+                routing_key="slack.event.*"
+            )
+
+            self._initialized = True
+            logger.info("queue_initialized", rabbitmq_host=settings.rabbitmq_host)
+
+        except Exception as e:
+            logger.error("rabbitmq_connection_failed", error=str(e))
+            raise
+
+    async def _declare_queue(self, queue_name: str) -> aio_pika.Queue:
         """Declare a durable queue"""
-        self.channel.queue_declare(
-            queue=queue_name,
+        queue = await self.channel.declare_queue(
+            name=queue_name,
             durable=True,
             arguments={
                 'x-message-ttl': 86400000,  # 24 hours
                 'x-max-length': 100000
             }
         )
+        return queue
 
-    def publish(self, queue: str, message: dict, routing_key: Optional[str] = None) -> bool:
+    async def publish(self, queue: str, message: dict, routing_key: Optional[str] = None) -> bool:
         """Publish message to queue"""
         try:
-            body = json.dumps(message)
+            if not self._initialized:
+                logger.error("queue_not_initialized")
+                return False
+
+            body = json.dumps(message).encode()
+
+            # Create message with persistent delivery mode
+            aio_message = aio_pika.Message(
+                body=body,
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                content_type='application/json'
+            )
 
             if routing_key:
                 # Publish to exchange with routing key
-                self.channel.basic_publish(
-                    exchange=self.EVENTS_EXCHANGE,
-                    routing_key=routing_key,
-                    body=body,
-                    properties=pika.BasicProperties(
-                        delivery_mode=2,  # Persistent
-                        content_type='application/json'
-                    )
+                await self.exchange.publish(
+                    message=aio_message,
+                    routing_key=routing_key
                 )
             else:
                 # Publish directly to queue
-                self.channel.basic_publish(
-                    exchange='',
-                    routing_key=queue,
-                    body=body,
-                    properties=pika.BasicProperties(
-                        delivery_mode=2,
-                        content_type='application/json'
-                    )
+                await self.channel.default_exchange.publish(
+                    message=aio_message,
+                    routing_key=queue
                 )
 
             return True
@@ -130,10 +126,19 @@ class QueueManager:
             logger.error("queue_publish_error", queue=queue, error=str(e))
             return False
 
-    def close(self):
+    async def get_queue(self, queue_name: str) -> Optional[aio_pika.Queue]:
+        """Get queue object for consumption"""
+        try:
+            return await self.channel.get_queue(queue_name)
+        except Exception as e:
+            logger.error("get_queue_error", queue=queue_name, error=str(e))
+            return None
+
+    async def close(self):
         """Close RabbitMQ connection"""
         if self.connection and not self.connection.is_closed:
-            self.connection.close()
+            await self.connection.close()
+        self._initialized = False
         logger.info("queue_closed")
 
 

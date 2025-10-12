@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     api_host: str = Field(default="0.0.0.0")
     api_port: int = Field(default=8000)
     workers: int = Field(default=4)
+    app_base_url: str = Field(default="http://localhost:8000")
 
     # Slack Configuration
     slack_bot_token: str = Field(..., min_length=1)
@@ -28,6 +29,19 @@ class Settings(BaseSettings):
     slack_client_id: str = Field(..., min_length=1)
     slack_client_secret: str = Field(..., min_length=1)
     slack_bot_user_id: Optional[str] = Field(default=None)  # Bot's user ID for filtering
+
+    # Stripe Configuration (optional - set these when enabling billing)
+    stripe_secret_key: Optional[str] = Field(default=None)
+    stripe_publishable_key: Optional[str] = Field(default=None)
+    stripe_webhook_secret: Optional[str] = Field(default=None)
+    stripe_price_starter: Optional[str] = Field(default=None)  # Price ID for starter tier
+    stripe_price_growth: Optional[str] = Field(default=None)  # Price ID for growth tier
+    stripe_price_business: Optional[str] = Field(default=None)  # Price ID for business tier
+    stripe_price_enterprise: Optional[str] = Field(default=None)  # Price ID for enterprise tier
+
+    # Email Configuration (AWS SES) - optional for development
+    email_sender_address: Optional[str] = Field(default=None)  # Verified SES email
+    email_sender_name: str = Field(default="Slack AI Assistant")
 
     # MySQL Configuration
     mysql_host: str = Field(default="localhost")
@@ -40,6 +54,11 @@ class Settings(BaseSettings):
     def mysql_url(self) -> str:
         """Construct MySQL connection URL"""
         return f"mysql+pymysql://{self.mysql_user}:{self.mysql_password}@{self.mysql_host}:{self.mysql_port}/{self.mysql_database}"
+
+    @property
+    def oauth_redirect_uri(self) -> str:
+        """Construct OAuth redirect URI from app base URL"""
+        return f"{self.app_base_url}/oauth/callback"
 
     # Pinecone Configuration
     pinecone_api_key: str = Field(..., min_length=1)
@@ -106,6 +125,32 @@ class Settings(BaseSettings):
     # Rate Limiting
     query_rate_limit_per_hour: int = Field(default=100)
     query_burst_limit_per_minute: int = Field(default=10)
+
+    # Code Intelligence Settings
+    enable_code_intelligence: bool = Field(default=True)
+    code_embedding_provider: str = Field(default="voyage")  # voyage|openai
+    code_embedding_model: str = Field(default="voyage-code-2")
+    code_embedding_dimension: int = Field(default=1536)
+    voyage_api_key: Optional[str] = Field(default=None)  # Voyage AI API key
+
+    # Pinecone namespace strategy
+    pinecone_code_namespace: str = Field(default="code")  # Separate namespace for code
+
+    # Language support
+    supported_code_languages: list = Field(default_factory=lambda: [
+        "python", "javascript", "typescript", "java",
+        "go", "rust", "cpp", "csharp", "ruby", "php", "sql"
+    ])
+
+    # AST parsing settings
+    enable_ast_parsing: bool = Field(default=True)
+    max_code_snippet_length: int = Field(default=10000)  # characters
+    min_code_snippet_lines: int = Field(default=1)  # Capture all code, even single lines
+
+    # Code retrieval settings
+    code_search_weight: float = Field(default=0.6)  # Weight for code vs text search
+    enable_structural_matching: bool = Field(default=True)
+    code_search_min_score: float = Field(default=0.0)  # Minimum similarity score (0.0 = no filtering)
 
 
 # Singleton instance

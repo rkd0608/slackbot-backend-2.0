@@ -45,10 +45,11 @@ class QueryRewriter:
                 conversation_id, db
             )
 
-            if not conversation or not hasattr(conversation, 'history'):
+            if not conversation:
                 return query
 
-            history = conversation.history
+            # conversation is a dict, not a model object
+            history = conversation.get('history', [])
 
             # If no history or very first turn, no rewriting needed
             if not history or len(history) < 2:
@@ -76,11 +77,12 @@ class QueryRewriter:
                         "content": """You are a query rewriter. Your job is to rewrite user queries into standalone questions that don't require conversation context.
 
 Rules:
-1. Resolve pronouns (it, that, this, they) to their actual referents
-2. Include missing context from conversation history
+1. Resolve pronouns (it, that, this, they, the channel, etc.) to their actual referents
+2. Include missing context from conversation history (especially channel names!)
 3. Preserve the user's intent exactly
 4. Keep the query concise
 5. If the query is already standalone, return it unchanged
+6. IMPORTANT: If the original query mentioned a specific channel (like #engineering), include it in ALL follow-up queries
 
 Examples:
 Input: "What about the database?"
@@ -94,6 +96,14 @@ Output: "When did John mention the Redis migration?"
 Input: "Show me the code for it"
 History: "User: How does authentication work?\nAssistant: We use JWT tokens..."
 Output: "Show me the code for JWT authentication"
+
+Input: "anything discussed on cache in the channel?"
+History: "User: what was discussed in the #engineering channel?\nAssistant: Discussions in #engineering included..."
+Output: "anything discussed on cache in the #engineering channel?"
+
+Input: "any sql queries shared?"
+History: "User: what was discussed in the #engineering channel?\nAssistant: Discussions in #engineering..."
+Output: "any sql queries shared in the #engineering channel?"
 """
                     },
                     {

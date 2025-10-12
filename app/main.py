@@ -21,7 +21,7 @@ from app.core.exceptions import (
     PermissionException
 )
 
-from app.api import health, events, admin, query, answer, commands, interactions, evaluation
+from app.api import health, events, admin, query, answer, commands, interactions, oauth, billing, stripe_webhooks, admin_dashboard, jobs, auth
 
 # Setup logging
 setup_logging()
@@ -38,14 +38,31 @@ async def lifespan(app: FastAPI):
         # Initialize core services
         db_manager.initialize()
         await cache_manager.initialize()
-        queue_manager.initialize()
+        await queue_manager.initialize()
         vector_db_manager.initialize()
-        storage_manager.initialize()
+
+        # Storage is optional - don't fail startup if unavailable
+        try:
+            storage_manager.initialize()
+        except Exception as e:
+            logger.warning("storage_init_skipped", error=str(e))
+
         slack_client_manager.initialize()
 
         # Start metrics updater background task
         from app.services.metrics_updater import start_metrics_updater
         await start_metrics_updater()
+
+        # Initialize and start background job scheduler
+        from app.core.scheduler import scheduler_manager
+        scheduler_manager.initialize()
+        scheduler_manager.start()
+        logger.info("scheduler_started")
+
+        # Start RabbitMQ queue consumer
+        from app.workers.queue_consumer import queue_consumer
+        await queue_consumer.start()
+        logger.info("queue_consumer_started")
 
         logger.info("application_started")
         yield
@@ -53,9 +70,19 @@ async def lifespan(app: FastAPI):
     finally:
         # Shutdown
         logger.info("application_shutting_down")
+
+        # Stop background workers
+        from app.core.scheduler import scheduler_manager
+        from app.workers.queue_consumer import queue_consumer
+
+        scheduler_manager.shutdown()
+        await queue_consumer.stop()
+
+        # Close core services
         await db_manager.close()
         await cache_manager.close()
-        queue_manager.close()
+        await queue_manager.close()
+
         logger.info("application_stopped")
 
 
@@ -66,6 +93,15 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Middleware (order matters - add from innermost to outermost)
+# Rate limiting middleware
+from app.core.rate_limit import RateLimitMiddleware
+app.add_middleware(RateLimitMiddleware)
+
+# Slack signature verification body cache middleware
+from app.core.slack_verification import SlackRequestBodyCacheMiddleware
+app.add_middleware(SlackRequestBodyCacheMiddleware)
 
 # CORS middleware
 app.add_middleware(
@@ -104,13 +140,19 @@ async def base_exception_handler(request: Request, exc: SlackIntelligenceExcepti
 
 # Include routers
 app.include_router(health.router, prefix="/api/v1", tags=["health"])
+app.include_router(auth.router, prefix="/api/v1", tags=["auth"])
 app.include_router(events.router, prefix="/api/v1", tags=["events"])
 app.include_router(commands.router, prefix="/api/v1", tags=["commands"])
 app.include_router(interactions.router, prefix="/api/v1", tags=["interactions"])
-app.include_router(evaluation.router, prefix="/api/v1", tags=["evaluation"])
+# Note: Evaluation router removed - replaced with knowledge graph system
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 app.include_router(query.router, prefix="/api/v1", tags=["query"])
 app.include_router(answer.router, prefix="/api/v1", tags=["answer"])
+app.include_router(oauth.router, tags=["oauth"])  # OAuth endpoints without /api/v1 prefix
+app.include_router(billing.router, prefix="/api/v1", tags=["billing"])
+app.include_router(stripe_webhooks.router, prefix="/api/v1", tags=["stripe"])
+app.include_router(admin_dashboard.router, prefix="/api/v1", tags=["admin-dashboard"])
+app.include_router(jobs.router, prefix="/api/v1", tags=["jobs"])
 
 
 # Metrics endpoint

@@ -12,6 +12,9 @@ class Entity(Base):
     # Primary key
     id = Column(BigInteger, primary_key=True, autoincrement=True)
 
+    # Multi-tenancy
+    team_id = Column(String(50), nullable=False, index=True)
+
     # Entity information
     entity_text = Column(String(500), nullable=False)
     entity_type = Column(String(100), nullable=False, index=True)  # technical, business, people, etc.
@@ -37,6 +40,7 @@ class Entity(Base):
     __table_args__ = (
         Index('idx_type_canonical', 'entity_type', 'canonical_form'),
         Index('idx_occurrence', 'occurrence_count'),
+        Index('idx_entities_team_canonical', 'team_id', 'canonical_form'),
     )
 
 
@@ -46,6 +50,9 @@ class EntityRelationship(Base):
     __tablename__ = "entity_relationships"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    # Multi-tenancy
+    team_id = Column(String(50), nullable=False, index=True)
 
     # Relationship
     entity_id_1 = Column(BigInteger, nullable=False, index=True)

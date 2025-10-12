@@ -28,7 +28,7 @@ class StorageManager:
             # Verify bucket exists
             self.s3_client.head_bucket(Bucket=self.bucket)
             logger.info("storage_initialized", bucket=self.bucket)
-        except ClientError as e:
+        except (ClientError, Exception) as e:
             logger.warning(
                 "storage_init_failed",
                 bucket=self.bucket,

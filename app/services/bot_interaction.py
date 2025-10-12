@@ -42,14 +42,17 @@ class BotInteractionService:
                 reaction="eyes"
             )
 
-            # Step 1: Get or create conversation (moved up to get conversation_id)
+            # Step 1: Get or create conversation based on thread
+            # Always use thread-based conversations to maintain context across slash commands and messages
             conversation = None
             if conversation_id:
                 conversation = await conversation_service.get_conversation(
                     conversation_id, db
                 )
             else:
-                conversation_id = await conversation_service.create_conversation(
+                # Create thread-based conversation using thread_ts
+                conversation_id = await conversation_service.get_or_create_by_thread(
+                    thread_ts=thread_ts,
                     user_id=user_id,
                     initial_query=query,
                     db=db
@@ -93,6 +96,14 @@ class BotInteractionService:
             if conversation:
                 conversation_history = conversation.history if hasattr(conversation, 'history') else conversation.get('history', [])
 
+            logger.info(
+                "conversation_history_retrieved",
+                conversation_id=conversation_id,
+                has_conversation=bool(conversation),
+                history_length=len(conversation_history),
+                history_preview=str(conversation_history)[:500] if conversation_history else "empty"
+            )
+
             # Step 6: Assemble context
             context_data = await context_service.assemble_context(
                 results=retrieval_results,  # retrieval_results is already a list
@@ -110,12 +121,23 @@ class BotInteractionService:
 
             # Step 8: Generate LLM response
             if conversation_history:
+                logger.info(
+                    "using_conversation_history_for_llm",
+                    conversation_id=conversation_id,
+                    history_turns=len(conversation_history),
+                    history_summary=[{"role": h.get("role"), "content_length": len(h.get("content", ""))} for h in conversation_history]
+                )
                 llm_response = await llm_service.generate_with_conversation(
                     prompt=prompt,
                     conversation_history=conversation_history,
                     stream=False
                 )
             else:
+                logger.info(
+                    "no_conversation_history_for_llm",
+                    conversation_id=conversation_id,
+                    reason="history is empty"
+                )
                 llm_response = await llm_service.generate_response(
                     prompt=prompt,
                     stream=False
@@ -281,39 +303,50 @@ class BotInteractionService:
             # Remove bot mention from text if present
             # Bot mentions look like <@U123456789>
             import re
+            original_text = text
             text = re.sub(r'<@[A-Z0-9]+>', '', text).strip()
 
+            logger.info(
+                "message_event_debug",
+                user_id=user_id,
+                channel=channel,
+                original_text=original_text,
+                text_after_mention_removal=text,
+                thread_ts=thread_ts
+            )
+
             if not text:
-                # If no text after removing mention, show help
-                help_response = response_formatter.format_help_message()
-                await slack_client_manager.post_message(
-                    channel=channel,
-                    text=help_response["text"],
-                    blocks=help_response["blocks"],
-                    thread_ts=thread_ts
-                )
+                # If no text after removing mention, ignore (don't show help)
+                # This prevents duplicate responses when slash commands trigger mention events
+                logger.info("empty_mention_ignored", user=user_id, channel=channel)
                 return True
 
-            # Check if it's a find or ask query based on keywords
-            text_lower = text.lower()
-            if any(keyword in text_lower for keyword in ["find", "search", "show me", "list"]):
-                # Treat as find query
-                return await self.handle_find_query(
-                    query=text,
-                    user_id=user_id,
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    db=db
-                )
-            else:
-                # Default to ask query
-                return await self.handle_ask_query(
-                    query=text,
-                    user_id=user_id,
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    db=db
-                )
+            # Get or create conversation for this thread to maintain context
+            conversation_id = await conversation_service.get_or_create_by_thread(
+                thread_ts=thread_ts,
+                user_id=user_id,
+                initial_query=text,
+                db=db
+            )
+
+            logger.info(
+                "conversation_linked_to_thread",
+                conversation_id=conversation_id,
+                thread_ts=thread_ts,
+                user_id=user_id
+            )
+
+            # Always treat natural language conversations as ask queries (AI-generated answers)
+            # This enables multi-turn conversations in threads
+            # Users should use /find explicitly if they want search results
+            return await self.handle_ask_query(
+                query=text,
+                user_id=user_id,
+                channel=channel,
+                thread_ts=thread_ts,
+                db=db,
+                conversation_id=conversation_id  # Pass conversation_id to maintain context
+            )
 
         except Exception as e:
             logger.error("handle_message_event_error", error=str(e))

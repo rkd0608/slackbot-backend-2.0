@@ -7,8 +7,10 @@ from sqlalchemy import select
 from app.models.message import Message
 from app.models.thread import Thread
 from app.models.user import User
+from app.models.channel import Channel
 from app.core.logging import get_logger
 from app.core.queue import queue_manager
+from app.services.code_detector import code_detector
 
 logger = get_logger(__name__)
 
@@ -17,11 +19,31 @@ class MessageProcessor:
     """Processes and enriches Slack messages"""
 
     # Regex patterns
-    CODE_BLOCK_PATTERN = re.compile(r'```(\w+)?\n(.*?)```', re.DOTALL)
-    INLINE_CODE_PATTERN = re.compile(r'`([^`]+)`')
     URL_PATTERN = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
     MENTION_PATTERN = re.compile(r'<@([A-Z0-9]+)>')
     CHANNEL_MENTION_PATTERN = re.compile(r'<#([A-Z0-9]+)\|([^>]+)>')
+
+    async def process_message(
+        self,
+        message_data: Dict[str, Any],
+        channel_id: str,
+        channel_name: str,
+        team_id: str,
+        db: AsyncSession
+    ) -> Optional[Message]:
+        """Process a message (used by initial indexing worker)"""
+        # Enrich message_data with channel info if not present
+        if "channel" not in message_data:
+            message_data["channel"] = channel_id
+        if "channel_name" not in message_data:
+            message_data["channel_name"] = channel_name
+
+        # Call the main event processor
+        return await self.process_message_event(
+            event=message_data,
+            team_id=team_id,
+            db=db
+        )
 
     async def process_message_event(
         self,
@@ -34,10 +56,15 @@ class MessageProcessor:
         # Extract message data
         message_data = self._extract_message_data(event, team_id)
 
-        # Enrich with user name from database
+        # Enrich with user-name from database
         if message_data.get("user_id") and not message_data.get("user_name"):
             user_name = await self._get_user_name(message_data["user_id"], db)
             message_data["user_name"] = user_name
+
+        # Enrich with channel_name from database if not provided
+        if message_data.get("channel_id") and not message_data.get("channel_name"):
+            channel_name = await self._get_channel_name(message_data["channel_id"], team_id, db)
+            message_data["channel_name"] = channel_name
 
         # If we cannot derive a valid user identifier, skip persisting
         if not message_data.get("user_id"):
@@ -81,8 +108,66 @@ class MessageProcessor:
         if message.thread_ts and message.thread_ts != message.message_id:
             await self._update_thread(message, db)
 
+        # Extract and store entities (company-specific intelligence)
+        if message.text_processed and len(message.text_processed) > 10:
+            try:
+                from app.services.entity_service import entity_service
+                await entity_service.extract_and_store_entities(
+                    message_text=message.text_processed,
+                    message_id=message.message_id,
+                    channel_id=message.channel_id,
+                    user_id=message.user_id,
+                    team_id=message.team_id,
+                    db=db
+                )
+            except Exception as e:
+                logger.error("entity_extraction_failed", error=str(e), message_id=message.message_id)
+
+        # Extract and embed code snippets (code intelligence)
+        if message.has_code:
+            try:
+                from app.core.config import settings
+                if settings.enable_code_intelligence:
+                    from app.services.code_extraction_service import code_extraction_service
+                    from app.services.code_embedding_service import code_embedding_service
+
+                    logger.info("code_extraction_started", message_id=message.message_id)
+
+                    # Extract and store code snippets from message
+                    snippet_ids = await code_extraction_service.extract_and_store_code(
+                        message_id=message.message_id,
+                        text=message.text,
+                        db=db
+                    )
+
+                    logger.info(
+                        "code_extraction_completed",
+                        message_id=message.message_id,
+                        snippet_count=len(snippet_ids)
+                    )
+
+                    # Generate embeddings for each code snippet
+                    for snippet_id in snippet_ids:
+                        try:
+                            success = await code_embedding_service.embed_code_snippet(
+                                snippet_id=snippet_id,
+                                db=db
+                            )
+                            if success:
+                                logger.info("code_embedded", snippet_id=snippet_id)
+                            else:
+                                logger.warning("code_embedding_failed", snippet_id=snippet_id)
+                        except Exception as embed_error:
+                            logger.error(
+                                "code_embedding_error",
+                                snippet_id=snippet_id,
+                                error=str(embed_error)
+                            )
+            except Exception as e:
+                logger.error("code_intelligence_failed", error=str(e), message_id=message.message_id)
+
         # Queue for embedding generation
-        queue_manager.publish(
+        await queue_manager.publish(
             queue=queue_manager.EMBEDDINGS_QUEUE,
             message={
                 "message_id": message.message_id,
@@ -100,10 +185,10 @@ class MessageProcessor:
         text = event.get("text", "")
         ts = event.get("ts") or event.get("event_ts")
 
-        # Parse message content
-        code_blocks = self._extract_code_blocks(text)
-        has_code = len(code_blocks) > 0
-        code_languages = list(set([cb["language"] for cb in code_blocks if cb["language"]]))
+        # Parse message content - use CodeDetector for robust code detection
+        code_blocks = code_detector.detect_code_blocks(text)
+        code_languages = list(set([cb.get("language") for cb in code_blocks if cb.get("language") and cb.get("language") != "unknown"]))
+        has_code = len(code_languages) > 0
 
         links = self._extract_links(text)
         mentioned_users = self._extract_mentions(text)
@@ -161,16 +246,6 @@ class MessageProcessor:
             "raw_json": event
         }
 
-    def _extract_code_blocks(self, text: str) -> List[Dict[str, str]]:
-        """Extract code blocks from message"""
-        blocks = []
-        for match in self.CODE_BLOCK_PATTERN.finditer(text):
-            blocks.append({
-                "language": match.group(1) or "unknown",
-                "code": match.group(2)
-            })
-        return blocks
-
     def _extract_links(self, text: str) -> List[str]:
         """Extract URLs from message"""
         # Slack format: <https://example.com|label> or <https://example.com>
@@ -224,8 +299,9 @@ class MessageProcessor:
         if self.URL_PATTERN.search(text):
             score += 1.0
 
-        # Has code
-        if self.CODE_BLOCK_PATTERN.search(text):
+        # Has code - use CodeDetector for accurate detection
+        code_blocks = code_detector.detect_code_blocks(text)
+        if len(code_blocks) > 0:
             score += 1.5
 
         # Message length (longer messages often more informative)
@@ -313,6 +389,28 @@ class MessageProcessor:
 
         except Exception as e:
             logger.error("get_user_name_error", user_id=user_id, error=str(e))
+            return None
+
+    async def _get_channel_name(self, channel_id: str, team_id: str, db: AsyncSession) -> Optional[str]:
+        """Get channel name from Channels table"""
+        try:
+            # Check if channel exists in database
+            result = await db.execute(
+                select(Channel).where(
+                    Channel.channel_id == channel_id,
+                    Channel.team_id == team_id
+                )
+            )
+            channel = result.scalar_one_or_none()
+
+            if channel and channel.channel_name:
+                return channel.channel_name
+
+            logger.warning("channel_name_not_found", channel_id=channel_id, team_id=team_id)
+            return None
+
+        except Exception as e:
+            logger.error("get_channel_name_error", channel_id=channel_id, error=str(e))
             return None
 
 

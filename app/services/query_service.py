@@ -214,7 +214,13 @@ class QueryService:
         """Extract channel references from query"""
         channels = []
 
-        # Extract #channel-name format
+        # FIRST: Extract Slack-formatted channel mentions (BEFORE lowercasing!)
+        # Format: <#CHANNEL_ID|channel_name> or <#CHANNEL_ID>
+        # We want to keep the CHANNEL_ID in uppercase to match Pinecone
+        slack_channel_mentions = re.findall(r'<#([A-Z0-9]+)(?:\|[^>]+)?>', query)
+        channels.extend(slack_channel_mentions)
+
+        # THEN: Extract #channel-name format (from lowercased query)
         channel_mentions = re.findall(r'#([a-z0-9-_]+)', query.lower())
         channels.extend(channel_mentions)
 

@@ -10,6 +10,142 @@ class ResponseFormatter:
     """Formats bot responses for Slack using Block Kit"""
 
     @staticmethod
+    def _parse_answer_blocks(answer: str) -> List[Dict[str, Any]]:
+        """
+        Parse answer into alternating text and code blocks.
+
+        Returns:
+            List of dicts with 'type' ('text' or 'code'), 'content', and optionally 'language'
+        """
+        # Handle empty or None answer
+        if not answer or not isinstance(answer, str):
+            return [{'type': 'text', 'content': ''}]
+
+        parts = []
+
+        try:
+            # Split by code fence markers
+            segments = answer.split('```')
+
+            # If there are no code blocks, return the entire answer as text
+            if len(segments) == 1:
+                return [{'type': 'text', 'content': answer}]
+
+            for idx, segment in enumerate(segments):
+                # Skip empty segments
+                if not segment:
+                    continue
+
+                if idx % 2 == 0:
+                    # Text segment
+                    if segment.strip():
+                        parts.append({
+                            'type': 'text',
+                            'content': segment
+                        })
+                else:
+                    # Code segment
+                    # Handle edge case where segment might not have newlines
+                    if '\n' in segment:
+                        lines = segment.split('\n', 1)
+                        language = lines[0].strip() if len(lines) > 0 else ''
+                        code_content = lines[1] if len(lines) > 1 else segment
+                    else:
+                        # No newline after language identifier
+                        language = ''
+                        code_content = segment
+
+                    parts.append({
+                        'type': 'code',
+                        'content': code_content,
+                        'language': language
+                    })
+
+            # If parts is empty, return the original answer as text
+            if not parts:
+                return [{'type': 'text', 'content': answer}]
+
+            return parts
+
+        except Exception as e:
+            # If parsing fails for any reason, return the entire answer as text
+            logger.error("parse_answer_blocks_error", error=str(e))
+            return [{'type': 'text', 'content': answer}]
+
+    @staticmethod
+    def _split_text_smart(text: str, max_length: int) -> List[str]:
+        """
+        Split text at paragraph boundaries to respect length limit.
+        """
+        if len(text) <= max_length:
+            return [text]
+
+        chunks = []
+        paragraphs = text.split('\n\n')
+        current_chunk = ""
+
+        for para in paragraphs:
+            if len(current_chunk) + len(para) + 2 <= max_length:
+                if current_chunk:
+                    current_chunk += "\n\n" + para
+                else:
+                    current_chunk = para
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk)
+
+                # If single paragraph is too long, split by sentences
+                if len(para) > max_length:
+                    sentences = re.split(r'([.!?]\s+)', para)
+                    temp = ""
+                    for sent in sentences:
+                        if len(temp) + len(sent) <= max_length:
+                            temp += sent
+                        else:
+                            if temp:
+                                chunks.append(temp)
+                            temp = sent
+                    if temp:
+                        current_chunk = temp
+                    else:
+                        current_chunk = ""
+                else:
+                    current_chunk = para
+
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        return chunks
+
+    @staticmethod
+    def _split_code_block(code: str, max_length: int) -> List[str]:
+        """
+        Split code block at line boundaries to respect length limit.
+        """
+        if len(code) <= max_length:
+            return [code]
+
+        chunks = []
+        lines = code.split('\n')
+        current_chunk = ""
+
+        for line in lines:
+            if len(current_chunk) + len(line) + 1 <= max_length:
+                if current_chunk:
+                    current_chunk += "\n" + line
+                else:
+                    current_chunk = line
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                current_chunk = line
+
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        return chunks
+
+    @staticmethod
     def convert_to_slack_markdown(text: str) -> str:
         """Convert standard markdown to Slack mrkdwn format"""
 
@@ -31,8 +167,10 @@ class ResponseFormatter:
 
         # Convert `code` to `code` (already compatible)
 
-        # Convert ```code blocks``` to Slack format
-        text = re.sub(r'```(\w+)?\n(.+?)\n```', r'```\2```', text, flags=re.DOTALL)
+        # Convert ```code blocks``` to Slack format (keep language identifier)
+        # Slack format: ```language\ncode\n``` or just ```\ncode\n```
+        # Keep as-is since Slack supports standard markdown code blocks
+        # Just ensure proper newlines are preserved
 
         # Convert [text](url) to <url|text>
         text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<\2|\1>', text)
@@ -55,17 +193,66 @@ class ResponseFormatter:
         """Format LLM answer with citations as Slack blocks"""
         blocks = []
 
-        # Convert markdown to Slack format
-        formatted_answer = ResponseFormatter.convert_to_slack_markdown(answer)
+        # Parse answer into text and code blocks
+        parts = ResponseFormatter._parse_answer_blocks(answer)
 
-        # Main answer text
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": formatted_answer
-            }
-        })
+        # Process each part
+        for part in parts:
+            if part['type'] == 'text':
+                # Convert markdown to Slack format
+                formatted_text = ResponseFormatter.convert_to_slack_markdown(part['content'])
+
+                # Split text if it exceeds limit
+                if len(formatted_text) <= 2900:
+                    blocks.append({
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": formatted_text
+                        }
+                    })
+                else:
+                    # Split long text at paragraph boundaries
+                    chunks = ResponseFormatter._split_text_smart(formatted_text, 2900)
+                    for chunk in chunks:
+                        blocks.append({
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": chunk
+                            }
+                        })
+
+            elif part['type'] == 'code':
+                # Use Slack's rich text block for code (better formatting, syntax highlighting)
+                code_content = part['content']
+                language = part.get('language', '')
+
+                # Add a small header before code block
+                if language:
+                    blocks.append({
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Code ({language}):*"
+                        }
+                    })
+
+                # Keep code as one block, no matter the length
+                blocks.append({
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_preformatted",
+                            "elements": [
+                                {
+                                    "type": "text",
+                                    "text": code_content
+                                }
+                            ]
+                        }
+                    ]
+                })
 
         # Add divider if there are citations
         if citations:
@@ -86,14 +273,20 @@ class ResponseFormatter:
                 else:
                     channel_ref = f"#{channel_name}"
 
+                # Build citation line with proper escaping
+                citation_text = f"*{idx}.* {channel_ref}"
+
+                # Add user mention (escape any special characters in username)
+                if user and user != "unknown":
+                    citation_text += f" - {user}"
+
+                # Add link or timestamp
                 if url:
-                    citation_lines.append(
-                        f"{idx}. {channel_ref} - @{user} - <{url}|View Message>"
-                    )
-                else:
-                    citation_lines.append(
-                        f"{idx}. {channel_ref} - @{user} - _{timestamp}_"
-                    )
+                    citation_text += f" - <{url}|View Message>"
+                elif timestamp:
+                    citation_text += f" - _{timestamp}_"
+
+                citation_lines.append(citation_text)
 
             blocks.append({
                 "type": "section",

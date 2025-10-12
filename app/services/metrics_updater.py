@@ -4,17 +4,11 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, func
 from app.core.database import db_manager
 from app.models.query_log import QueryLog
-from app.models.golden_test import EvaluationRun
 from app.core.monitoring import (
     feedback_rate,
     avg_retrieval_score,
     query_rewrite_rate,
-    query_expansion_rate,
-    evaluation_pass_rate,
-    evaluation_precision,
-    evaluation_recall,
-    evaluation_mrr,
-    evaluation_ndcg
+    query_expansion_rate
 )
 from app.core.logging import get_logger
 
@@ -31,7 +25,7 @@ class MetricsUpdater:
                 await self._update_feedback_rate(session)
                 await self._update_avg_retrieval_score(session)
                 await self._update_query_enhancement_rates(session)
-                await self._update_evaluation_metrics(session)
+                # Note: Evaluation metrics removed - evaluation tables were replaced with knowledge graph
 
                 logger.info("metrics_updated")
 
@@ -115,37 +109,6 @@ class MetricsUpdater:
 
         query_rewrite_rate.set((rewritten / total * 100))
         query_expansion_rate.set((expanded / total * 100))
-
-    async def _update_evaluation_metrics(self, session):
-        """Update metrics from latest evaluation run"""
-        # Get most recent completed evaluation run
-        result = await session.execute(
-            select(EvaluationRun)
-            .where(EvaluationRun.completed_at.isnot(None))
-            .order_by(EvaluationRun.completed_at.desc())
-            .limit(1)
-        )
-        latest_run = result.scalar_one_or_none()
-
-        if not latest_run:
-            return
-
-        # Overall metrics
-        pass_rate = (latest_run.passed_tests / latest_run.total_tests * 100) if latest_run.total_tests > 0 else 0
-
-        evaluation_pass_rate.labels(category="overall").set(pass_rate)
-
-        if latest_run.avg_precision_at_5:
-            evaluation_precision.labels(category="overall").set(latest_run.avg_precision_at_5)
-        if latest_run.avg_recall_at_5:
-            evaluation_recall.labels(category="overall").set(latest_run.avg_recall_at_5)
-        if latest_run.avg_mrr:
-            evaluation_mrr.labels(category="overall").set(latest_run.avg_mrr)
-        if latest_run.avg_ndcg:
-            evaluation_ndcg.labels(category="overall").set(latest_run.avg_ndcg)
-
-        # Per-category metrics (if needed, query evaluation_results grouped by test category)
-        # This would require joining with golden_tests table
 
 
 # Global instance

@@ -17,13 +17,14 @@ alembic==1.13.1
 pinecone-client==3.0.2
 
 # Message Queue
-pika==1.3.2
+aio-pika==9.4.0
 
 # AWS S3
 boto3==1.34.34
 
 # Embeddings & LLM
 openai==1.10.0
+voyageai==0.2.3  # Code embeddings
 
 # Caching
 redis==5.0.1
@@ -44,5 +45,12 @@ pypdf==4.0.1
 httpx==0.26.0
 pydantic==2.5.3
 pydantic-settings==2.1.0
+email-validator==2.1.0
 tenacity==8.2.3
 nest-asyncio==1.5.8
+
+# Background Job Scheduling
+APScheduler==3.10.4
+
+# Payment Processing
+stripe==8.2.0

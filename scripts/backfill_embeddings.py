@@ -44,15 +44,13 @@ async def backfill_message_embeddings(batch_size: int = 100):
         # Process in batches
         processed = 0
         failed = 0
-        offset = 0
 
-        while offset < total:
-            # Get batch of messages
+        while True:
+            # Get batch of messages (no offset needed - always get next unprocessed batch)
             result = await session.execute(
                 select(Message)
                 .where(Message.vector_id.is_(None))
                 .limit(batch_size)
-                .offset(offset)
             )
             messages = result.scalars().all()
 
@@ -77,8 +75,6 @@ async def backfill_message_embeddings(batch_size: int = 100):
                 except Exception as e:
                     logger.error("embed_error", message_id=message.message_id, error=str(e))
                     failed += 1
-
-            offset += batch_size
 
             # Small delay to avoid rate limits
             await asyncio.sleep(0.5)
@@ -115,16 +111,14 @@ async def backfill_file_embeddings(batch_size: int = 50):
         # Process in batches
         processed = 0
         failed = 0
-        offset = 0
 
-        while offset < total:
-            # Get batch of files
+        while True:
+            # Get batch of files (no offset needed - always get next unprocessed batch)
             result = await session.execute(
                 select(File)
                 .where(File.vector_id.is_(None))
                 .where(File.extracted_text.isnot(None))
                 .limit(batch_size)
-                .offset(offset)
             )
             files = result.scalars().all()
 
@@ -149,8 +143,6 @@ async def backfill_file_embeddings(batch_size: int = 50):
                 except Exception as e:
                     logger.error("embed_error", file_id=file.file_id, error=str(e))
                     failed += 1
-
-            offset += batch_size
 
             # Small delay to avoid rate limits
             await asyncio.sleep(0.5)
