@@ -132,13 +132,31 @@ Return ONLY valid JSON, no explanation."""
     def _process_analysis(self, analysis: Dict[str, Any], original_query: str) -> Dict[str, Any]:
         """Post-process and validate GPT-4 analysis"""
 
+        # FIRST: Extract Slack-formatted channel IDs from original query (BEFORE lowercasing!)
+        # Format: <#CHANNEL_ID|channel_name> - we want the CHANNEL_ID in uppercase
+        slack_channel_ids = re.findall(r'<#([A-Z0-9]+)(?:\|[^>]+)?>', original_query)
+
+        # THEN: Get LLM-extracted channel names (lowercased)
+        llm_channels = [ch.lower().strip() for ch in analysis.get("channels", [])]
+
+        # Combine: prioritize Slack IDs, then add LLM-extracted names
+        all_channels = list(set(slack_channel_ids + llm_channels))
+
+        logger.info(
+            "channel_extraction_debug",
+            original_query=original_query[:100],
+            slack_channel_ids=slack_channel_ids,
+            llm_channels=llm_channels,
+            all_channels=all_channels
+        )
+
         # Ensure all required fields exist
         processed = {
             "original_query": original_query,
             "query_type": analysis.get("query_type", "factual"),
             "intents": analysis.get("intents", []),
             "entities": analysis.get("entities", []),
-            "channels": [ch.lower().strip() for ch in analysis.get("channels", [])],
+            "channels": all_channels,
             "users": [u.lower().strip() for u in analysis.get("users", [])],
             "temporal": self._process_temporal(analysis.get("temporal")),
             "has_code_intent": analysis.get("has_code_intent", False),

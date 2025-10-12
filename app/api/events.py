@@ -1,8 +1,10 @@
 """Slack Events API webhook endpoints"""
-from fastapi import APIRouter, Request, HTTPException, Header
 from typing import Optional
-from app.services.slack_events import slack_event_handler
+
+from fastapi import APIRouter, Request, HTTPException, Header
+
 from app.core.logging import get_logger
+from app.services.slack_events import slack_event_handler
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -16,7 +18,7 @@ async def slack_events_webhook(
 ):
     """Webhook endpoint for Slack Events API"""
 
-    # Get raw request body
+    # Get raw request body ONCE (calling both body() and json() causes Starlette errors)
     body_bytes = await request.body()
 
     # Verify Slack signature
@@ -33,10 +35,11 @@ async def slack_events_webhook(
     else:
         logger.warning("slack_signature_headers_missing")
 
-    # Parse JSON
-    event_data = await request.json()
+    # Parse JSON from bytes (don't call request.json() after request.body())
+    import json
+    event_data = json.loads(body_bytes)
 
-    # Handle event
+    # Process event using asyncio (independent task)
     response = await slack_event_handler.handle_event(event_data)
 
     return response

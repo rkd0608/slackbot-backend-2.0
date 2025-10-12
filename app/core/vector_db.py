@@ -75,9 +75,17 @@ class VectorDBManager:
                 include_metadata=include_metadata
             )
 
+            logger.info(
+                "pinecone_query_result_debug",
+                filter=filter_dict,
+                result_type=type(results).__name__,
+                has_matches_attr=hasattr(results, 'matches'),
+                matches_count=len(results.get("matches", [])) if hasattr(results, 'get') else (len(results.matches) if hasattr(results, 'matches') else 0)
+            )
+
             return results.get("matches", [])
         except Exception as e:
-            logger.error("vector_query_error", error=str(e))
+            logger.error("vector_query_error", error=str(e), filter=filter_dict)
             return []
 
     def delete(self, ids: List[str]) -> bool:
@@ -97,6 +105,160 @@ class VectorDBManager:
             return stats
         except Exception as e:
             logger.error("vector_stats_error", error=str(e))
+            return {}
+
+    def upsert_to_namespace(
+        self,
+        namespace: str,
+        vectors: List[Dict[str, Any]]
+    ) -> bool:
+        """
+        Upsert vectors to a specific Pinecone namespace
+
+        Namespaces allow logical separation within the same index:
+        - "default" or "" for regular message/file embeddings
+        - "code" for code snippet embeddings
+        - Future: "entities", "summaries", etc.
+
+        Args:
+            namespace: Namespace name (e.g., "code")
+            vectors: List of vector dicts with id, values, metadata
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Format: [(id, values, metadata), ...]
+            formatted_vectors = [
+                (
+                    vec["id"],
+                    vec["values"],
+                    vec.get("metadata", {})
+                )
+                for vec in vectors
+            ]
+
+            # Upsert to specific namespace
+            self.index.upsert(
+                vectors=formatted_vectors,
+                namespace=namespace
+            )
+
+            logger.info(
+                "vectors_upserted_to_namespace",
+                namespace=namespace,
+                count=len(vectors)
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                "namespace_upsert_error",
+                namespace=namespace,
+                error=str(e)
+            )
+            return False
+
+    def query_namespace(
+        self,
+        namespace: str,
+        vector: List[float],
+        top_k: int = 10,
+        filter_dict: Optional[Dict[str, Any]] = None,
+        include_metadata: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Query vectors from a specific Pinecone namespace
+
+        Args:
+            namespace: Namespace to query (e.g., "code")
+            vector: Query vector
+            top_k: Number of results to return
+            filter_dict: Metadata filters
+            include_metadata: Whether to include metadata
+
+        Returns:
+            List of matching vectors with metadata
+        """
+        try:
+            results = self.index.query(
+                namespace=namespace,
+                vector=vector,
+                top_k=top_k,
+                filter=filter_dict,
+                include_metadata=include_metadata
+            )
+
+            matches = results.get("matches", []) if hasattr(results, 'get') else results.matches
+
+            logger.info(
+                "namespace_query_completed",
+                namespace=namespace,
+                top_k=top_k,
+                matches_count=len(matches),
+                filter=filter_dict
+            )
+
+            return matches
+
+        except Exception as e:
+            logger.error(
+                "namespace_query_error",
+                namespace=namespace,
+                error=str(e)
+            )
+            return []
+
+    def delete_from_namespace(
+        self,
+        namespace: str,
+        ids: List[str]
+    ) -> bool:
+        """Delete vectors from a specific namespace"""
+        try:
+            self.index.delete(
+                ids=ids,
+                namespace=namespace
+            )
+
+            logger.info(
+                "vectors_deleted_from_namespace",
+                namespace=namespace,
+                count=len(ids)
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                "namespace_delete_error",
+                namespace=namespace,
+                error=str(e)
+            )
+            return False
+
+    def get_namespace_stats(self, namespace: str) -> Dict[str, Any]:
+        """Get statistics for a specific namespace"""
+        try:
+            stats = self.index.describe_index_stats()
+
+            # Extract namespace-specific stats
+            namespaces = stats.get("namespaces", {})
+            namespace_stats = namespaces.get(namespace, {})
+
+            logger.info(
+                "namespace_stats_retrieved",
+                namespace=namespace,
+                vector_count=namespace_stats.get("vector_count", 0)
+            )
+
+            return namespace_stats
+
+        except Exception as e:
+            logger.error(
+                "namespace_stats_error",
+                namespace=namespace,
+                error=str(e)
+            )
             return {}
 
 

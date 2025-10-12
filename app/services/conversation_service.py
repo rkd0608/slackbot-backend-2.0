@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
+from sqlalchemy.orm import attributes
 from app.models.conversation import Conversation
 from app.core.logging import get_logger
 import uuid
@@ -73,6 +74,12 @@ class ConversationService:
             }
 
             history = conversation.history or []
+            logger.info(
+                "before_add_turn",
+                conversation_id=conversation_id,
+                current_history_length=len(history),
+                adding_role=role
+            )
             history.append(turn)
 
             # Keep only last MAX_TURNS_IN_MEMORY turns
@@ -89,13 +96,18 @@ class ConversationService:
             elif role == "assistant":
                 conversation.last_response = content
 
+            # Mark the history field as modified to ensure SQLAlchemy commits the JSON change
+            attributes.flag_modified(conversation, "history")
+
             await db.commit()
+            await db.refresh(conversation)
 
             logger.info(
                 "turn_added",
                 conversation_id=conversation_id,
                 role=role,
-                turn_count=conversation.turn_count
+                turn_count=conversation.turn_count,
+                final_history_length=len(conversation.history) if conversation.history else 0
             )
 
             return True
@@ -238,6 +250,61 @@ class ConversationService:
         except Exception as e:
             logger.error("delete_conversation_error", conversation_id=conversation_id, error=str(e))
             return False
+
+    async def get_or_create_by_thread(
+        self,
+        thread_ts: str,
+        user_id: str,
+        initial_query: str,
+        db: AsyncSession
+    ) -> str:
+        """Get existing conversation for thread or create new one
+
+        For now, we use conversation_id = thread_ts as a simple mapping.
+        This ensures each Slack thread has exactly one conversation.
+        """
+
+        # Use thread_ts as conversation_id for direct mapping
+        conversation_id = f"thread_{thread_ts}"
+
+        # Check if conversation already exists
+        result = await db.execute(
+            select(Conversation).where(Conversation.conversation_id == conversation_id)
+        )
+        conversation = result.scalar_one_or_none()
+
+        if conversation:
+            logger.info(
+                "conversation_found_for_thread",
+                conversation_id=conversation_id,
+                thread_ts=thread_ts
+            )
+            return conversation_id
+
+        # Create new conversation for this thread
+        title = initial_query[:50] + "..." if len(initial_query) > 50 else initial_query
+
+        conversation = Conversation(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            title=title,
+            turn_count=0,
+            history=[],
+            last_query=initial_query
+        )
+
+        db.add(conversation)
+        await db.commit()
+        await db.refresh(conversation)
+
+        logger.info(
+            "conversation_created_for_thread",
+            conversation_id=conversation_id,
+            thread_ts=thread_ts,
+            user_id=user_id
+        )
+
+        return conversation_id
 
 
 # Global conversation service instance

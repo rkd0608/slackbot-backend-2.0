@@ -4,6 +4,6 @@ datasources:
   - name: Prometheus
     type: prometheus
     access: proxy
-    url: http://host.docker.internal:8000/metrics
+    url: http://app:8000/metrics
     isDefault: true
     editable: true

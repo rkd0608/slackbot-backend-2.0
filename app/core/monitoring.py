@@ -192,40 +192,8 @@ query_expansion_rate = Gauge(
     registry=registry
 )
 
-evaluation_pass_rate = Gauge(
-    'evaluation_pass_rate',
-    'Golden test evaluation pass rate',
-    ['category'],
-    registry=registry
-)
-
-evaluation_precision = Gauge(
-    'evaluation_precision_at_5',
-    'Average Precision@5 from latest evaluation',
-    ['category'],
-    registry=registry
-)
-
-evaluation_recall = Gauge(
-    'evaluation_recall_at_5',
-    'Average Recall@5 from latest evaluation',
-    ['category'],
-    registry=registry
-)
-
-evaluation_mrr = Gauge(
-    'evaluation_mrr',
-    'Average MRR from latest evaluation',
-    ['category'],
-    registry=registry
-)
-
-evaluation_ndcg = Gauge(
-    'evaluation_ndcg_at_5',
-    'Average NDCG@5 from latest evaluation',
-    ['category'],
-    registry=registry
-)
+# Note: Evaluation metrics (pass_rate, precision, recall, mrr, ndcg) removed
+# Evaluation system was replaced with knowledge graph
 
 retrieval_no_results = Counter(
     'retrieval_no_results_total',

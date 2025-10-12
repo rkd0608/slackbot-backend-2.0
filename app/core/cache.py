@@ -74,6 +74,23 @@ class CacheManager:
             logger.error("cache_exists_error", key=key, error=str(e))
             return False
 
+    async def incr(self, key: str) -> int:
+        """Atomically increment a key's value"""
+        try:
+            return await self.client.incr(key)
+        except Exception as e:
+            logger.error("cache_incr_error", key=key, error=str(e))
+            return 0
+
+    async def expire(self, key: str, ttl: int) -> bool:
+        """Set TTL on an existing key"""
+        try:
+            await self.client.expire(key, ttl)
+            return True
+        except Exception as e:
+            logger.error("cache_expire_error", key=key, error=str(e))
+            return False
+
 
 # Global cache manager instance
 cache_manager = CacheManager()

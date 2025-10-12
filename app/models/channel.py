@@ -40,6 +40,18 @@ class Channel(Base):
     # Channel embedding for semantic discovery
     embedding_vector_id = Column(String(100), nullable=True)
 
+    # Indexing controls (for workspace admins)
+    is_indexed = Column(Integer, default=1, nullable=False)  # 1=indexed, 0=not indexed
+    indexing_enabled = Column(Integer, default=1, nullable=False)  # Admin toggle
+    indexing_status = Column(
+        String(50),
+        default='pending',
+        nullable=False
+    )  # pending, active, paused, complete
+    indexing_started_at = Column(DateTime, nullable=True)
+    indexing_completed_at = Column(DateTime, nullable=True)
+    last_message_indexed_ts = Column(String(50), nullable=True)  # Slack timestamp
+
     # Timestamps
     slack_created_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -27,8 +27,12 @@ class ContextService:
 
         logger.info("context_assembly_started", results=len(results))
 
+        # Separate file results from message results
+        file_results = [r for r in results if r.get("result_type") == "file"]
+        message_results = [r for r in results if r.get("result_type") == "message"]
+
         # Fetch full message details
-        messages = await self._fetch_messages(results, db)
+        messages = await self._fetch_messages(message_results, db)
 
         # Group by threads
         threads = self._group_by_threads(messages)
@@ -40,7 +44,7 @@ class ContextService:
             thread_contexts.append(context)
 
         # Sort by relevance (based on original result scores)
-        scored_contexts = self._score_contexts(thread_contexts, results)
+        scored_contexts = self._score_contexts(thread_contexts, message_results)
 
         # Select top contexts within token budget
         selected_contexts = self._select_within_budget(
@@ -57,14 +61,21 @@ class ContextService:
         logger.info(
             "context_assembled",
             threads=len(selected_contexts),
-            total_messages=sum(len(c["messages"]) for c in selected_contexts)
+            total_messages=sum(len(c["messages"]) for c in selected_contexts),
+            files=len(file_results)
         )
 
-        return {
+        context_dict = {
             "meta_context": meta_context,
             "thread_contexts": selected_contexts,
             "query_analysis": query_analysis
         }
+
+        # Add file results if any
+        if file_results:
+            context_dict["file_results"] = file_results
+
+        return context_dict
 
     async def _fetch_messages(
         self,

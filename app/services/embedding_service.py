@@ -75,6 +75,11 @@ class EmbeddingService:
                 logger.error("message_not_found", message_id=message_id)
                 return False
 
+            # Skip if already embedded (prevent duplicates)
+            if message.vector_id:
+                logger.info("message_already_embedded", message_id=message_id, vector_id=message.vector_id)
+                return True
+
             # Build context for embedding
             context_text = await self._build_message_context(message, db)
 
@@ -180,8 +185,14 @@ class EmbeddingService:
             if not file_record or not file_record.extracted_text:
                 return False
 
-            # Get channel name
+            # Skip if already embedded (prevent duplicates)
+            if file_record.vector_id:
+                logger.info("file_already_embedded", file_id=file_id, vector_id=file_record.vector_id)
+                return True
+
+            # Get channel name and team_id
             channel_name = None
+            team_id = None
             if file_record.channel_id:
                 channel_result = await db.execute(
                     select(Channel).where(Channel.channel_id == file_record.channel_id)
@@ -189,6 +200,7 @@ class EmbeddingService:
                 channel = channel_result.scalar_one_or_none()
                 if channel:
                     channel_name = channel.channel_name
+                    team_id = channel.team_id
 
             # Build context
             context = f"File: {file_record.filename}\n"
@@ -218,6 +230,10 @@ class EmbeddingService:
                 "timestamp": file_record.created_at.isoformat(),
                 "text": file_record.extracted_text[:1000]
             }
+
+            # Add team_id if available
+            if team_id:
+                metadata["team_id"] = team_id
 
             # Add channel_name if available
             if channel_name:

@@ -93,6 +93,45 @@ class PromptService:
 
             parts.append("")
 
+        # Add file results
+        file_results = context.get("file_results", [])
+        if file_results:
+            parts.append("## Relevant Files\n")
+
+            for idx, file_res in enumerate(file_results[:5], 1):  # Limit to top 5 files
+                parts.append(f"### File {idx}: {file_res.get('filename', 'unknown')}")
+                parts.append(f"**Type**: {file_res.get('filetype', 'unknown')}")
+
+                if file_res.get('title'):
+                    parts.append(f"**Title**: {file_res['title']}")
+
+                if file_res.get('uploaded_by_name'):
+                    parts.append(f"**Uploaded by**: @{file_res['uploaded_by_name']}")
+
+                if file_res.get('created_at'):
+                    try:
+                        dt = datetime.fromisoformat(str(file_res['created_at']).replace('Z', '+00:00'))
+                        time_str = dt.strftime("%Y-%m-%d %H:%M")
+                        parts.append(f"**Uploaded**: {time_str}")
+                    except (ValueError, TypeError, AttributeError):
+                        pass
+
+                if file_res.get('channel_name'):
+                    parts.append(f"**Channel**: #{file_res['channel_name']}")
+
+                # Add download link prominently
+                if file_res.get('slack_url'):
+                    parts.append(f"**Download**: {file_res['slack_url']}")
+
+                # Add extracted text preview (shorter for files)
+                extracted_text = file_res.get('extracted_text', '')
+                if extracted_text:
+                    preview = extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
+                    parts.append(f"\n**Content Preview**:")
+                    parts.append(f"{preview}\n")
+
+                parts.append("")
+
         # Add thread contexts
         thread_contexts = context.get("thread_contexts", [])
         if thread_contexts:
@@ -121,7 +160,7 @@ class PromptService:
                     try:
                         dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                         time_str = dt.strftime("%Y-%m-%d %H:%M")
-                    except:
+                    except (ValueError, TypeError, AttributeError):
                         time_str = timestamp
 
                     parts.append(f"**{user}** ({time_str}):")
@@ -157,7 +196,14 @@ class PromptService:
             entity_texts = [e["text"] for e in entities]
             parts.append(f"- Focus on information related to: {', '.join(entity_texts)}")
 
-        parts.append("- Provide citations with [Channel, @User, timestamp] format for all factual claims.")
+        # Citation instructions
+        if file_results:
+            parts.append("- When referencing files, provide the download link from the 'Download' field in your answer.")
+            parts.append("- Format file references as: 'filename (Download: URL)'")
+            parts.append("- For message information, cite with [Channel, @User, timestamp] format.")
+        else:
+            parts.append("- Provide citations with [Channel, @User, timestamp] format for all factual claims.")
+
         parts.append("- If information is not found in the context, explicitly state that.")
         parts.append("- Be concise but comprehensive.")
 
@@ -176,18 +222,45 @@ Core Principles:
 4. **Thoroughness**: Carefully examine all provided messages and discussions before concluding information is absent
 5. **Context-Aware**: Consider the temporal, social, and topical context of discussions
 
-Formatting Guidelines (Slack-compatible):
-- Use *bold* for emphasis (single asterisks)
-- Use _italic_ for secondary emphasis (underscores)
-- Use `code` for inline code (backticks)
-- Use ```code blocks``` for multi-line code
+Formatting Guidelines (Slack-compatible markdown):
+- Use *bold* for emphasis (single asterisks, not double)
+- Use _italic_ for secondary emphasis (underscores, not single asterisks)
+- Use `code` for inline code (single backticks)
+- For multi-line code blocks, ALWAYS use this EXACT format:
+  ```language
+  code here
+  ```
+  CRITICAL: Opening ``` must be followed by language (python, javascript, etc), then newline, then code, then closing ``` on its own line
 - Use • for bullet points
 - Keep paragraphs separated by blank lines
 - Use clear section headers when organizing information
 
+CODE BLOCK RULES:
+✓ CORRECT:
+```python
+import requests
+response = requests.get(url)
+print(response.text)
+```
+
+✗ WRONG (missing closing backticks):
+```python
+import requests
+response = requests.get(url)
+
+✗ WRONG (no newline after language):
+```python import requests
+
+✗ WRONG (closing backticks not on separate line):
+```python
+code here```
+
+CRITICAL: NEVER split code into multiple parts (e.g., "Part 1/2", "Part 2/2"). Always provide complete code in ONE continuous block, regardless of length. If code is long, include ALL of it in a single code block.
+
 Important:
 - Carefully review ALL messages in the provided context before stating information is not available
-- When code or technical content is shared in messages, include it in your response
+- When code or technical content is shared in messages, include it in your response COMPLETELY in one block
+- NEVER truncate or split code - always provide the FULL code snippet
 - If information genuinely isn't in the context, then state that clearly
 - Provide outdated information when more recent context exists is not preferred
 - Format your response to be easily readable in Slack"""
@@ -204,12 +277,19 @@ Important:
     def _get_code_prompt(self) -> str:
         """Prompt for code queries"""
         return """For this CODE query:
-- Include complete, runnable code snippets
-- Preserve code formatting and syntax
-- Add brief explanations of what the code does
+- Include complete, runnable code snippets with PROPER formatting
+- CRITICAL: Use proper code block syntax:
+  ```language
+  code here
+  ```
+  Opening ``` MUST be followed by language, newline, code, then closing ``` on its own line
+- Preserve exact code formatting, indentation, and syntax from the source messages
+- NEVER split code into "Part 1/2" and "Part 2/2" - provide ALL code in ONE continuous block
+- Add brief explanations OUTSIDE the code blocks
 - Cite the author and context: [Channel, @User, timestamp]
 - If multiple implementations exist, show the most relevant or recent one
-- Include any important warnings or caveats mentioned in discussions"""
+- Include any important warnings or caveats mentioned in discussions
+- Test your response mentally: can you locate both opening and closing ```? If not, fix it."""
 
     def _get_summary_prompt(self) -> str:
         """Prompt for summary queries"""
@@ -258,11 +338,16 @@ Important:
 - Provide step-by-step instructions
 - Number the steps clearly using *1.*, *2.*, etc.
 - Include any prerequisites or setup needed
-- Add code examples with ```code blocks```
+- Add code examples with PROPERLY FORMATTED code blocks:
+  ```language
+  code here
+  ```
+  ENSURE closing ``` exists on its own line
 - Use *bold* for important actions or commands
 - Cite the source of the guidance
 - Include common pitfalls or troubleshooting tips if mentioned
-- Link to any related documentation mentioned"""
+- Link to any related documentation mentioned
+- Double-check: every ``` opening MUST have a matching ``` closing"""
 
 
 # Global prompt service instance
