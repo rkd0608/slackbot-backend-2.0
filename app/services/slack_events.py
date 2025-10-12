@@ -53,7 +53,7 @@ class SlackEventHandler:
             logger.info("app_uninstalled", team_id=team_id)
 
             # Queue uninstallation handler
-            queue_manager.publish(
+            await queue_manager.publish(
                 queue=queue_manager.EVENTS_QUEUE,
                 message={
                     "event_type": "app_uninstalled",
@@ -73,7 +73,7 @@ class SlackEventHandler:
             logger.info("tokens_revoked", team_id=team_id)
 
             # Queue token revocation handler
-            queue_manager.publish(
+            await queue_manager.publish(
                 queue=queue_manager.EVENTS_QUEUE,
                 message={
                     "event_type": "tokens_revoked",
@@ -101,7 +101,7 @@ class SlackEventHandler:
 
             # Route event to appropriate queue with team_id for workspace isolation
             routing_key = f"slack.event.{event_subtype}"
-            queue_manager.publish(
+            await queue_manager.publish(
                 queue=queue_manager.EVENTS_QUEUE,
                 message={
                     "event": event,

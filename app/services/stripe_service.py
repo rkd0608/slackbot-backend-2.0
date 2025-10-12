@@ -63,6 +63,7 @@ class StripeService:
             return customer.id
 
         except Exception as e:
+            await db.rollback()
             logger.error(
                 "create_stripe_customer_error",
                 error=str(e),
@@ -141,6 +142,7 @@ class StripeService:
             }
 
         except Exception as e:
+            await db.rollback()
             logger.error(
                 "create_checkout_session_error",
                 error=str(e),
@@ -185,6 +187,7 @@ class StripeService:
             }
 
         except Exception as e:
+            await db.rollback()
             logger.error(
                 "create_billing_portal_error",
                 error=str(e),
@@ -265,6 +268,7 @@ class StripeService:
                 logger.error("subscription_notification_failed", error=str(notify_error))
 
         except Exception as e:
+            await db.rollback()
             logger.error(
                 "handle_subscription_created_error",
                 error=str(e),
@@ -319,6 +323,7 @@ class StripeService:
             )
 
         except Exception as e:
+            await db.rollback()
             logger.error(
                 "handle_subscription_updated_error",
                 error=str(e),
@@ -375,6 +380,7 @@ class StripeService:
             )
 
         except Exception as e:
+            await db.rollback()
             logger.error(
                 "handle_subscription_deleted_error",
                 error=str(e),
@@ -435,6 +441,7 @@ class StripeService:
             )
 
         except Exception as e:
+            await db.rollback()
             logger.error(
                 "handle_payment_succeeded_error",
                 error=str(e),
@@ -513,6 +520,7 @@ class StripeService:
                 logger.error("payment_failed_notification_error", error=str(notify_error))
 
         except Exception as e:
+            await db.rollback()
             logger.error(
                 "handle_payment_failed_error",
                 error=str(e),

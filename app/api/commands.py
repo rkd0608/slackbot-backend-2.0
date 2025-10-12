@@ -8,6 +8,7 @@ from app.services.bot_interaction import bot_interaction_service
 from app.services.response_formatter import response_formatter
 from app.core.logging import get_logger
 from app.core.config import settings
+from app.core.slack_verification import verify_slack_signature
 import hmac
 import hashlib
 import time
@@ -80,7 +81,8 @@ async def ask_command(
     response_url: str = Form(...),
     trigger_id: str = Form(None),
     x_slack_request_timestamp: Optional[str] = Header(None),
-    x_slack_signature: Optional[str] = Header(None)
+    x_slack_signature: Optional[str] = Header(None),
+    verified: bool = Depends(verify_slack_signature)
 ):
     """Handle /ask slash command - spawns independent task"""
     import asyncio
@@ -143,7 +145,8 @@ async def find_command(
     response_url: str = Form(...),
     trigger_id: str = Form(None),
     x_slack_request_timestamp: Optional[str] = Header(None),
-    x_slack_signature: Optional[str] = Header(None)
+    x_slack_signature: Optional[str] = Header(None),
+    verified: bool = Depends(verify_slack_signature)
 ):
     """Handle /find slash command"""
     import asyncio

@@ -22,7 +22,7 @@ async def reprocess_failed_files():
     """Reprocess files that failed to download"""
 
     db_manager.initialize()
-    queue_manager.initialize()
+    await queue_manager.initialize()
 
     async with db_manager.AsyncSessionLocal() as db:
         try:
@@ -73,7 +73,7 @@ async def reprocess_failed_files():
                         continue
 
                     # Queue for reprocessing
-                    queue_manager.publish(
+                    await queue_manager.publish(
                         queue=queue_manager.PROCESSING_QUEUE,
                         message={
                             "type": "file_processing",
@@ -98,7 +98,7 @@ async def reprocess_failed_files():
             logger.error(f"Error reprocessing files: {e}")
             raise
         finally:
-            queue_manager.close()
+            await queue_manager.close()
             await db_manager.close()
 
 

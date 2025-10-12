@@ -158,6 +158,7 @@ class CodeExtractionService:
             return snippet_id
 
         except Exception as e:
+            await db.rollback()
             logger.error(
                 "code_block_processing_error",
                 message_id=message_id,

@@ -137,6 +137,7 @@ class NotificationWorker:
                         )
 
                     except Exception as e:
+                        await db.rollback()
                         logger.error(
                             "expired_trial_notification_failed",
                             error=str(e),
@@ -193,6 +194,7 @@ class NotificationWorker:
                         )
 
                     except Exception as e:
+                        await db.rollback()
                         logger.error(
                             "query_limit_reset_failed",
                             error=str(e),
@@ -282,6 +284,7 @@ class NotificationWorker:
                                 )
 
                     except Exception as e:
+                        await db.rollback()
                         logger.error(
                             "user_count_sync_failed",
                             error=str(e),

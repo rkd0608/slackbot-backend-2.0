@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
         # Initialize core services
         db_manager.initialize()
         await cache_manager.initialize()
-        queue_manager.initialize()
+        await queue_manager.initialize()
         vector_db_manager.initialize()
 
         # Storage is optional - don't fail startup if unavailable
@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI):
         # Close core services
         await db_manager.close()
         await cache_manager.close()
-        queue_manager.close()
+        await queue_manager.close()
 
         logger.info("application_stopped")
 

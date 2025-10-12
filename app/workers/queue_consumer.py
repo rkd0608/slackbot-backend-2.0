@@ -1,7 +1,8 @@
-"""RabbitMQ queue consumer for background tasks"""
+"""RabbitMQ queue consumer for background tasks with aio-pika"""
 import asyncio
 import json
 from typing import Callable, Dict, Any
+import aio_pika
 from app.core.queue import queue_manager
 from app.core.database import db_manager
 from app.core.logging import get_logger
@@ -15,7 +16,7 @@ class QueueConsumer:
     def __init__(self):
         self.running = False
         self.handlers: Dict[str, Callable] = {}
-        self._consumer_tasks = []
+        self._consumer_tags = []
 
     def register_handler(self, routing_key: str, handler: Callable):
         """Register a handler function for a specific routing key"""
@@ -34,43 +35,36 @@ class QueueConsumer:
         # Register all handlers
         self._register_all_handlers()
 
-        # Start consuming from processing queue
-        processing_task = asyncio.create_task(
-            self._consume_queue(
-                queue=queue_manager.PROCESSING_QUEUE,
-                queue_name="processing"
-            )
-        )
-        self._consumer_tasks.append(processing_task)
-
-        # Start consuming from events queue
-        events_task = asyncio.create_task(
-            self._consume_queue(
-                queue=queue_manager.EVENTS_QUEUE,
-                queue_name="events"
-            )
-        )
-        self._consumer_tasks.append(events_task)
-
-        # Start consuming from embeddings queue
-        embeddings_task = asyncio.create_task(
-            self._consume_queue(
-                queue=queue_manager.EMBEDDINGS_QUEUE,
-                queue_name="embeddings"
-            )
-        )
-        self._consumer_tasks.append(embeddings_task)
+        # Start consuming from each queue
+        await self._start_consuming(queue_manager.PROCESSING_QUEUE, "processing")
+        await self._start_consuming(queue_manager.EVENTS_QUEUE, "events")
+        await self._start_consuming(queue_manager.EMBEDDINGS_QUEUE, "embeddings")
 
         logger.info("queue_consumer_started", queues=["processing", "events", "embeddings"])
+
+    async def _start_consuming(self, queue_name: str, consumer_name: str):
+        """Start consuming from a specific queue"""
+        try:
+            queue = await queue_manager.get_queue(queue_name)
+            if not queue:
+                logger.error("queue_not_found", queue=queue_name)
+                return
+
+            # Start consuming with proper callback
+            consumer_tag = await queue.consume(
+                callback=lambda message: self._process_message(message, consumer_name),
+                no_ack=False
+            )
+            self._consumer_tags.append(consumer_tag)
+
+            logger.info("queue_consumer_registered", queue=queue_name, consumer=consumer_name)
+
+        except Exception as e:
+            logger.error("queue_consume_start_error", queue=queue_name, error=str(e))
 
     async def stop(self):
         """Stop consuming messages"""
         self.running = False
-
-        # Cancel all consumer tasks
-        for task in self._consumer_tasks:
-            task.cancel()
-
         logger.info("queue_consumer_stopped")
 
     def _register_all_handlers(self):
@@ -103,117 +97,79 @@ class QueueConsumer:
             self._handle_workspace_deletion_schedule
         )
 
+        # Message events (real-time messages from Slack)
+        self.register_handler(
+            "slack.event.message",
+            self._handle_slack_message_event
+        )
+
+        # App mention events (bot is mentioned in a channel)
+        self.register_handler(
+            "slack.event.app_mention",
+            self._handle_app_mention_event
+        )
+
         # Message embedding
         self.register_handler(
             queue_manager.EMBEDDINGS_QUEUE,  # "slack.embeddings"
             self._handle_message_embedding
         )
 
-    async def _consume_queue(self, queue: str, queue_name: str):
-        """Consume messages from a specific queue"""
-
-        try:
-            while self.running:
-                try:
-                    # Get message from queue (non-blocking with timeout)
-                    method_frame, properties, body = queue_manager.channel.basic_get(
-                        queue=queue,
-                        auto_ack=False
-                    )
-
-                    if method_frame:
-                        # Process message
-                        await self._process_message(
-                            method_frame=method_frame,
-                            properties=properties,
-                            body=body,
-                            queue_name=queue_name
-                        )
-                    else:
-                        # No message available, wait a bit
-                        await asyncio.sleep(1)
-
-                except Exception as e:
-                    logger.error(
-                        "queue_consume_error",
-                        queue=queue_name,
-                        error=str(e)
-                    )
-                    await asyncio.sleep(5)  # Wait before retrying
-
-        except asyncio.CancelledError:
-            logger.info("queue_consumer_cancelled", queue=queue_name)
-
     async def _process_message(
         self,
-        method_frame,
-        properties,
-        body: bytes,
+        message: aio_pika.IncomingMessage,
         queue_name: str
     ):
         """Process a single message from the queue"""
 
-        try:
-            # Parse message
-            message = json.loads(body.decode())
-            routing_key = method_frame.routing_key
-
-            logger.info(
-                "message_received",
-                queue=queue_name,
-                routing_key=routing_key,
-                message=message
-            )
-
-            # Find handler - try routing key first, then queue name
-            handler = self.handlers.get(routing_key)
-
-            # For direct queue publishing (embeddings), use queue name as key
-            if not handler and routing_key == queue_name:
-                handler = self.handlers.get(queue_name)
-
-            if handler:
-                # Execute handler
-                await handler(message)
-
-                # Acknowledge message
-                queue_manager.channel.basic_ack(method_frame.delivery_tag)
+        async with message.process():
+            try:
+                # Parse message
+                body = json.loads(message.body.decode())
+                routing_key = message.routing_key or queue_name
 
                 logger.info(
-                    "message_processed",
+                    "message_received",
                     queue=queue_name,
                     routing_key=routing_key
                 )
-            else:
-                logger.warning(
-                    "no_handler_found",
-                    routing_key=routing_key,
-                    queue_name=queue_name,
-                    available_handlers=list(self.handlers.keys())
+
+                # Find handler - try routing key first, then queue name
+                handler = self.handlers.get(routing_key)
+
+                # For direct queue publishing (embeddings), use queue name as key
+                if not handler and routing_key == queue_name:
+                    handler = self.handlers.get(queue_name)
+
+                if handler:
+                    # Execute handler
+                    await handler(body)
+
+                    logger.info(
+                        "message_processed",
+                        queue=queue_name,
+                        routing_key=routing_key
+                    )
+                else:
+                    logger.warning(
+                        "no_handler_found",
+                        routing_key=routing_key,
+                        queue_name=queue_name,
+                        available_handlers=list(self.handlers.keys())
+                    )
+
+            except json.JSONDecodeError as e:
+                logger.error("message_parse_error", error=str(e))
+                # Message will be rejected (not requeued) on context exit
+
+            except Exception as e:
+                logger.error(
+                    "message_processing_error",
+                    error=str(e),
+                    queue=queue_name
                 )
-                # Acknowledge anyway to remove from queue
-                queue_manager.channel.basic_ack(method_frame.delivery_tag)
-
-        except json.JSONDecodeError as e:
-            logger.error("message_parse_error", error=str(e), body=body)
-            # Reject and don't requeue malformed messages
-            queue_manager.channel.basic_nack(
-                method_frame.delivery_tag,
-                requeue=False
-            )
-
-        except Exception as e:
-            logger.error(
-                "message_processing_error",
-                error=str(e),
-                queue=queue_name,
-                routing_key=method_frame.routing_key if method_frame else None
-            )
-            # Requeue for retry
-            queue_manager.channel.basic_nack(
-                method_frame.delivery_tag,
-                requeue=True
-            )
+                # Re-raise to trigger message requeue
+                raise
 
     # ====================
     # MESSAGE HANDLERS
@@ -347,6 +303,133 @@ class QueueConsumer:
                 error=str(e),
                 team_id=team_id
             )
+
+    async def _handle_slack_message_event(self, message: Dict[str, Any]):
+        """Handle real-time Slack message events"""
+
+        event = message.get("event")
+        team_id = message.get("team_id")
+
+        if not event or not team_id:
+            logger.error("invalid_message_event", message=message)
+            return
+
+        # Skip bot messages and message subtypes we don't want to index
+        if event.get("subtype") in ["bot_message", "channel_join", "channel_leave"]:
+            logger.info("skipping_message_subtype", subtype=event.get("subtype"))
+            return
+
+        # Skip messages from the bot itself to avoid infinite loops
+        if event.get("bot_id"):
+            logger.info("skipping_bot_message", bot_id=event.get("bot_id"))
+            return
+
+        logger.info(
+            "processing_slack_message",
+            team_id=team_id,
+            channel=event.get("channel"),
+            user=event.get("user"),
+            channel_type=event.get("channel_type")
+        )
+
+        try:
+            from app.services.message_processor import message_processor
+            from app.services.bot_interaction import bot_interaction_service
+
+            async for db in db_manager.get_session():
+                # Check if this is a DM (Direct Message)
+                channel_type = event.get("channel_type")
+                is_dm = channel_type == "im"
+
+                # Process and store the message
+                stored_message = await message_processor.process_message_event(
+                    event=event,
+                    team_id=team_id,
+                    db=db
+                )
+
+                if stored_message:
+                    logger.info(
+                        "slack_message_processed",
+                        message_id=stored_message.message_id,
+                        channel_id=stored_message.channel_id,
+                        channel_name=stored_message.channel_name,
+                        is_dm=is_dm
+                    )
+                else:
+                    logger.warning("slack_message_not_stored", event=event)
+
+                # If this is a DM, handle as bot interaction (auto-respond)
+                if is_dm and stored_message:
+                    logger.info(
+                        "handling_dm_interaction",
+                        message_id=stored_message.message_id,
+                        user_id=event.get("user")
+                    )
+                    await bot_interaction_service.handle_message_event(event, db)
+
+                break  # Only use first session
+
+        except Exception as e:
+            logger.error(
+                "slack_message_processing_failed",
+                error=str(e),
+                team_id=team_id,
+                channel=event.get("channel")
+            )
+            raise
+
+    async def _handle_app_mention_event(self, message: Dict[str, Any]):
+        """Handle app mention event - bot is mentioned in a channel or thread"""
+
+        event = message.get("event")
+        team_id = message.get("team_id")
+
+        if not event or not team_id:
+            logger.error("invalid_app_mention_event", message=message)
+            return
+
+        logger.info(
+            "processing_app_mention",
+            team_id=team_id,
+            channel=event.get("channel"),
+            user=event.get("user"),
+            thread_ts=event.get("thread_ts")
+        )
+
+        try:
+            from app.services.message_processor import message_processor
+            from app.services.bot_interaction import bot_interaction_service
+
+            async for db in db_manager.get_session():
+                # First, process and store the mention message
+                stored_message = await message_processor.process_message_event(
+                    event=event,
+                    team_id=team_id,
+                    db=db
+                )
+
+                if stored_message:
+                    logger.info(
+                        "app_mention_message_stored",
+                        message_id=stored_message.message_id,
+                        channel_id=stored_message.channel_id
+                    )
+
+                # Then handle bot interaction (generate response)
+                await bot_interaction_service.handle_message_event(event, db)
+
+                logger.info("app_mention_handled", user=event.get("user"), channel=event.get("channel"))
+                break  # Only use first session
+
+        except Exception as e:
+            logger.error(
+                "app_mention_processing_failed",
+                error=str(e),
+                team_id=team_id,
+                channel=event.get("channel")
+            )
+            raise
 
     async def _handle_message_embedding(self, message: Dict[str, Any]):
         """Handle message embedding generation"""

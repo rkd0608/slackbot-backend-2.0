@@ -238,7 +238,12 @@ async def get_workspace_channels(
         # Count messages per channel
         channel_data = []
         for channel in channels:
-            msg_stmt = select(func.count(Message.id)).where(Message.channel_id == channel.channel_id)
+            msg_stmt = select(func.count(Message.id)).where(
+                and_(
+                    Message.channel_id == channel.channel_id,
+                    Message.team_id == team_id
+                )
+            )
             msg_result = await db.execute(msg_stmt)
             message_count = msg_result.scalar()
 

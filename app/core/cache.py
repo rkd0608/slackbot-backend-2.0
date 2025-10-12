@@ -85,8 +85,8 @@ class CacheManager:
     async def expire(self, key: str, ttl: int) -> bool:
         """Set TTL on an existing key"""
         try:
-            await self.client.expire(key, ttl)
-            return True
+            result = await self.client.expire(key, ttl)
+            return bool(result)
         except Exception as e:
             logger.error("cache_expire_error", key=key, error=str(e))
             return False

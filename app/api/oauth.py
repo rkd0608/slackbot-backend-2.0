@@ -86,6 +86,7 @@ async def oauth_callback(
     except HTTPException:
         raise
     except Exception as e:
+        await db.rollback()
         logger.error("oauth_callback_error", error=str(e))
         raise HTTPException(status_code=500, detail="OAuth callback failed")
 

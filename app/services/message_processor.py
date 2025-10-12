@@ -7,8 +7,10 @@ from sqlalchemy import select
 from app.models.message import Message
 from app.models.thread import Thread
 from app.models.user import User
+from app.models.channel import Channel
 from app.core.logging import get_logger
 from app.core.queue import queue_manager
+from app.services.code_detector import code_detector
 
 logger = get_logger(__name__)
 
@@ -58,6 +60,11 @@ class MessageProcessor:
         if message_data.get("user_id") and not message_data.get("user_name"):
             user_name = await self._get_user_name(message_data["user_id"], db)
             message_data["user_name"] = user_name
+
+        # Enrich with channel_name from database if not provided
+        if message_data.get("channel_id") and not message_data.get("channel_name"):
+            channel_name = await self._get_channel_name(message_data["channel_id"], team_id, db)
+            message_data["channel_name"] = channel_name
 
         # If we cannot derive a valid user identifier, skip persisting
         if not message_data.get("user_id"):
@@ -160,7 +167,7 @@ class MessageProcessor:
                 logger.error("code_intelligence_failed", error=str(e), message_id=message.message_id)
 
         # Queue for embedding generation
-        queue_manager.publish(
+        await queue_manager.publish(
             queue=queue_manager.EMBEDDINGS_QUEUE,
             message={
                 "message_id": message.message_id,
@@ -179,10 +186,9 @@ class MessageProcessor:
         ts = event.get("ts") or event.get("event_ts")
 
         # Parse message content - use CodeDetector for robust code detection
-        from app.services.code_detector import code_detector
         code_blocks = code_detector.detect_code_blocks(text)
-        has_code = len(code_blocks) > 0
         code_languages = list(set([cb.get("language") for cb in code_blocks if cb.get("language") and cb.get("language") != "unknown"]))
+        has_code = len(code_languages) > 0
 
         links = self._extract_links(text)
         mentioned_users = self._extract_mentions(text)
@@ -294,7 +300,6 @@ class MessageProcessor:
             score += 1.0
 
         # Has code - use CodeDetector for accurate detection
-        from app.services.code_detector import code_detector
         code_blocks = code_detector.detect_code_blocks(text)
         if len(code_blocks) > 0:
             score += 1.5
@@ -384,6 +389,28 @@ class MessageProcessor:
 
         except Exception as e:
             logger.error("get_user_name_error", user_id=user_id, error=str(e))
+            return None
+
+    async def _get_channel_name(self, channel_id: str, team_id: str, db: AsyncSession) -> Optional[str]:
+        """Get channel name from Channels table"""
+        try:
+            # Check if channel exists in database
+            result = await db.execute(
+                select(Channel).where(
+                    Channel.channel_id == channel_id,
+                    Channel.team_id == team_id
+                )
+            )
+            channel = result.scalar_one_or_none()
+
+            if channel and channel.channel_name:
+                return channel.channel_name
+
+            logger.warning("channel_name_not_found", channel_id=channel_id, team_id=team_id)
+            return None
+
+        except Exception as e:
+            logger.error("get_channel_name_error", channel_id=channel_id, error=str(e))
             return None
 
 
