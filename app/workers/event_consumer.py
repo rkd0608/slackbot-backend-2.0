@@ -66,6 +66,8 @@ class EventConsumer(BaseConsumer):
                 success = loop.run_until_complete(self._handle_reaction_removed(event, team_id))
             elif event_type == "file_shared":
                 success = loop.run_until_complete(self._handle_file_shared(event, team_id))
+            elif event_type == "file_public":
+                success = loop.run_until_complete(self._handle_file_public(event, team_id))
             elif event_type == "channel_created":
                 success = loop.run_until_complete(self._handle_channel_created(event, team_id))
             elif event_type == "channel_rename":
@@ -275,6 +277,36 @@ class EventConsumer(BaseConsumer):
             return True
         except Exception as e:
             logger.error("handle_file_shared_error", error=str(e))
+            return False
+
+    async def _handle_file_public(self, event: Dict[str, Any], team_id: str) -> bool:
+        """Handle file public event - similar to file_shared"""
+        try:
+            file_info = event.get("file", {})
+
+            # Get file_id from either 'file' object or 'file_id' field
+            file_id = file_info.get("id") if file_info else event.get("file_id")
+
+            if not file_id:
+                logger.warning("file_public_missing_id", event=str(event)[:200])
+                return True  # Don't retry
+
+            queue_manager.publish(
+                queue=queue_manager.PROCESSING_QUEUE,
+                message={
+                    "type": "file_processing",
+                    "file_id": file_id,
+                    "file_info": file_info if file_info else {"id": file_id},
+                    "channel_id": event.get("channel_id"),
+                    "user_id": event.get("user_id"),
+                    "team_id": team_id
+                }
+            )
+
+            logger.info("file_public_queued_for_processing", file_id=file_id)
+            return True
+        except Exception as e:
+            logger.error("handle_file_public_error", error=str(e))
             return False
 
     async def _handle_channel_created(self, event: Dict[str, Any], team_id: str) -> bool:

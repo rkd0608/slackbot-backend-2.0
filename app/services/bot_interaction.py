@@ -184,10 +184,20 @@ class BotInteractionService:
                 thread_ts=thread_ts
             )
 
-            # Step 11: Log query with enhanced metadata
+            # Step 11: Get user's team_id for query logging
+            from app.models.user import User
+            from sqlalchemy import select as sql_select
+
+            user_stmt = sql_select(User).where(User.user_id == user_id)
+            user_result = await db.execute(user_stmt)
+            user = user_result.scalar_one_or_none()
+            team_id = user.team_id if user else None
+
+            # Step 12: Log query with enhanced metadata
             await self._log_query(
                 query_id=query_id,
                 user_id=user_id,
+                team_id=team_id,
                 original_query=original_query,
                 rewritten_query=rewritten_query if query_was_rewritten else None,
                 query_was_rewritten=query_was_rewritten,
@@ -395,6 +405,7 @@ class BotInteractionService:
         self,
         query_id: str,
         user_id: str,
+        team_id: Optional[str],
         original_query: str,
         rewritten_query: str,
         query_was_rewritten: bool,
@@ -411,6 +422,7 @@ class BotInteractionService:
             query_log = QueryLog(
                 query_id=query_id,
                 user_id=user_id,
+                team_id=team_id,
                 query_text=rewritten_query or original_query,
                 original_query=original_query,
                 rewritten_query=rewritten_query,
@@ -431,7 +443,7 @@ class BotInteractionService:
             db.add(query_log)
             await db.commit()
 
-            logger.info("query_logged", query_id=query_id, user_id=user_id)
+            logger.info("query_logged", query_id=query_id, user_id=user_id, team_id=team_id)
 
         except Exception as e:
             logger.error("query_log_error", error=str(e), query_id=query_id)

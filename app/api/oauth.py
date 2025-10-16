@@ -2,6 +2,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime
 from app.services.oauth_service import oauth_service
 from app.core.database import get_db
 from app.core.logging import get_logger
@@ -30,7 +31,7 @@ async def initiate_oauth():
 @router.get("/oauth/callback")
 async def oauth_callback(
     code: str = Query(..., description="Authorization code from Slack"),
-    state: str = Query(..., description="State token for CSRF protection"),
+    state: str = Query(default="", description="State token for CSRF protection (optional when using direct Slack link)"),
     error: str = Query(None, description="Error from Slack"),
     request: Request = None,
     db: AsyncSession = Depends(get_db)
@@ -43,11 +44,14 @@ async def oauth_callback(
         return RedirectResponse(url=f"/install/error?error={error}")
 
     try:
-        # Verify state token (CSRF protection)
-        is_valid_state = await oauth_service.verify_state_token(state)
-        if not is_valid_state:
-            logger.warning("oauth_state_verification_failed")
-            raise HTTPException(status_code=400, detail="Invalid state token")
+        # Verify OAuth state token (CSRF protection) - only if state is provided
+        if state:
+            is_valid_state = await oauth_service.verify_state_token(state)
+            if not is_valid_state:
+                logger.warning("oauth_state_verification_failed")
+                raise HTTPException(status_code=400, detail="Invalid state token")
+        else:
+            logger.info("oauth_without_state", message="Direct Slack OAuth link used (no state token)")
 
         # Exchange code for access tokens
         oauth_data = await oauth_service.exchange_code_for_token(code, db)
@@ -56,7 +60,7 @@ async def oauth_callback(
         access_token = oauth_data["access_token"]
         workspace_info = await oauth_service.get_workspace_info(access_token)
 
-        # Get installer email (optional)
+        # Get installer email from OAuth
         installer_email = oauth_data.get("authed_user", {}).get("email")
 
         # Create/update workspace record
@@ -67,21 +71,67 @@ async def oauth_callback(
             db=db
         )
 
+        # Create or update installer user record
+        from app.models.user import User
+        from sqlalchemy import select
+
+        slack_user_id = oauth_data.get("authed_user", {}).get("id")
+
+        # Check if user already exists
+        stmt = select(User).where(User.user_id == slack_user_id)
+        result = await db.execute(stmt)
+        user = result.scalar_one_or_none()
+
+        if user:
+            # Update existing user
+            user.email = installer_email
+            user.role = "admin"
+            user.is_admin = 1
+            user.updated_at = datetime.utcnow()
+        else:
+            # Create new user with minimal info (profile incomplete)
+            user = User(
+                user_id=slack_user_id,
+                team_id=workspace.team_id,
+                email=installer_email,
+                role="admin",
+                is_admin=1,
+                profile_completed=0,  # Profile needs to be completed
+                created_at=datetime.utcnow()
+            )
+            db.add(user)
+
+        await db.commit()
+        await db.refresh(user)
+        await db.refresh(workspace)
+
         # Log successful installation
         logger.info(
             "oauth_completed",
             team_id=workspace.team_id,
             team_name=workspace.team_name,
-            is_trial=workspace.is_trial
+            is_trial=workspace.is_trial,
+            profile_completed=user.profile_completed
         )
 
-        # Redirect to success page or dashboard
-        if workspace.subscription_status == "trial":
-            # New trial - redirect to onboarding
-            return RedirectResponse(url=f"/install/success?team_id={workspace.team_id}&trial=true")
+        # Redirect to frontend
+        from app.core.config import settings
+
+        if not user.profile_completed:
+            # New user - redirect to profile completion page
+            frontend_url = f"{settings.frontend_url}/onboarding/profile?team_id={workspace.team_id}&user_id={user.user_id}"
+            return RedirectResponse(url=frontend_url)
         else:
-            # Existing workspace - redirect to dashboard
-            return RedirectResponse(url=f"/dashboard?team_id={workspace.team_id}")
+            # Existing user (profile already completed) - redirect to login
+            # This handles reinstallation or re-authorization scenarios
+            logger.info(
+                "existing_user_reinstall",
+                user_id=user.user_id,
+                team_id=workspace.team_id,
+                message="Existing user clicked Add to Slack again"
+            )
+            frontend_url = f"{settings.frontend_url}/login?message=reinstall&team_id={workspace.team_id}"
+            return RedirectResponse(url=frontend_url)
 
     except HTTPException:
         raise

@@ -21,7 +21,7 @@ from app.core.exceptions import (
     PermissionException
 )
 
-from app.api import health, events, admin, query, answer, commands, interactions, oauth, billing, stripe_webhooks, admin_dashboard, jobs, auth
+from app.api import health, events, admin, query, answer, commands, interactions, oauth, billing, stripe_webhooks, admin_dashboard, jobs, auth, onboarding, workspace
 
 # Setup logging
 setup_logging()
@@ -141,6 +141,8 @@ async def base_exception_handler(request: Request, exc: SlackIntelligenceExcepti
 # Include routers
 app.include_router(health.router, prefix="/api/v1", tags=["health"])
 app.include_router(auth.router, prefix="/api/v1", tags=["auth"])
+app.include_router(onboarding.router, prefix="/api/v1", tags=["onboarding"])
+app.include_router(workspace.router, prefix="/api/v1", tags=["workspace"])
 app.include_router(events.router, prefix="/api/v1", tags=["events"])
 app.include_router(commands.router, prefix="/api/v1", tags=["commands"])
 app.include_router(interactions.router, prefix="/api/v1", tags=["interactions"])

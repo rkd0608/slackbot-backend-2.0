@@ -29,6 +29,10 @@ class Workspace(Base):
     installed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     is_active = Column(Integer, default=1, nullable=False)  # 1=active, 0=inactive
 
+    # Company information (captured during onboarding)
+    company_name = Column(String(255), nullable=True)
+    company_size = Column(String(50), nullable=True)  # "1-10", "11-50", "51-200", "201-500", "501+"
+
     # Subscription management
     subscription_status = Column(
         String(50),

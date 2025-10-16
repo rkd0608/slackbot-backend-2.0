@@ -41,6 +41,8 @@ class ProcessingConsumer(BaseConsumer):
                 return loop.run_until_complete(self._sync_member(message))
             elif task_type == "user_sync":
                 return loop.run_until_complete(self._sync_user(message))
+            elif task_type == "initial_workspace_indexing":
+                return loop.run_until_complete(self._index_workspace(message))
             else:
                 logger.warning("unknown_task_type", task_type=task_type)
                 return True  # Don't retry unknown tasks
@@ -187,6 +189,26 @@ class ProcessingConsumer(BaseConsumer):
             except Exception as e:
                 logger.error("channel_archive_failed", channel_id=message.get("channel_id"), error=str(e))
                 return False
+
+    async def _index_workspace(self, message: Dict[str, Any]) -> bool:
+        """Initial indexing of workspace"""
+        try:
+            from app.workers.initial_indexing import initial_indexing_worker
+
+            team_id = message.get("team_id")
+            bot_token = message.get("bot_token")
+
+            logger.info("initial_indexing_job_started", team_id=team_id)
+
+            await initial_indexing_worker.index_workspace(
+                team_id=team_id,
+                bot_token=bot_token
+            )
+
+            return True
+        except Exception as e:
+            logger.error("initial_indexing_job_failed", error=str(e), team_id=message.get("team_id"))
+            return False
 
 
 # Global processing consumer instance
