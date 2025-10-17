@@ -58,6 +58,7 @@ class SchedulerManager:
         # Import workers here to avoid circular imports
         from app.workers.notification_worker import notification_worker
         from app.workers.initial_indexing import initial_indexing_worker
+        from app.services.event_buffer_service import event_buffer_service
 
         # ====================
         # TRIAL MANAGEMENT
@@ -124,6 +125,30 @@ class SchedulerManager:
             replace_existing=True
         )
         logger.info("scheduled_job_added", job_id="scheduler_health_check", schedule="Every 5 minutes")
+
+        # ====================
+        # EVENT RELIABILITY
+        # ====================
+
+        # Retry buffered events - Run every 30 seconds
+        self.scheduler.add_job(
+            func=event_buffer_service.retry_buffered_events,
+            trigger=IntervalTrigger(seconds=30),
+            id='retry_buffered_events',
+            name='Retry Buffered Events',
+            replace_existing=True
+        )
+        logger.info("scheduled_job_added", job_id="retry_buffered_events", schedule="Every 30 seconds")
+
+        # Clean up old processed events - Run daily at 4:00 AM UTC
+        self.scheduler.add_job(
+            func=event_buffer_service.cleanup_old_processed_events,
+            trigger=CronTrigger(hour=4, minute=0),
+            id='cleanup_processed_events',
+            name='Cleanup Old Processed Events',
+            replace_existing=True
+        )
+        logger.info("scheduled_job_added", job_id="cleanup_processed_events", schedule="Daily 4:00 AM UTC")
 
         # ====================
         # CLEANUP JOBS

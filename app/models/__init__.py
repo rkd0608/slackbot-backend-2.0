@@ -9,6 +9,8 @@ from app.models.query_log import QueryLog
 from app.models.conversation import Conversation
 from app.models.workspace import Workspace, InstallationLog
 from app.models.user_expertise import UserExpertise, SignificantEvent
+from app.models.event_buffer import EventBuffer, EventBufferStatus
+from app.models.processed_event import ProcessedEvent
 
 __all__ = [
     "Message",
@@ -23,5 +25,8 @@ __all__ = [
     "Workspace",
     "InstallationLog",
     "UserExpertise",
-    "SignificantEvent"
+    "SignificantEvent",
+    "EventBuffer",
+    "EventBufferStatus",
+    "ProcessedEvent"
 ]

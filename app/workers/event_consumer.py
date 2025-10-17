@@ -105,6 +105,17 @@ class EventConsumer(BaseConsumer):
                     await bot_interaction_service.handle_message_event(event, db)
                     return True
 
+                # Idempotency check - skip if already processed
+                event_id = event.get("event_id")
+                if event_id:
+                    from app.models.processed_event import ProcessedEvent
+                    result = await db.execute(
+                        select(ProcessedEvent).where(ProcessedEvent.event_id == event_id)
+                    )
+                    if result.scalar_one_or_none():
+                        logger.info("event_already_processed", event_id=event_id, event_type="message")
+                        return True  # ACK but skip processing
+
                 # Process the message normally
                 message = await message_processor.process_message_event(event, team_id, db)
 
@@ -116,7 +127,7 @@ class EventConsumer(BaseConsumer):
                 if message and message.has_files and message.file_ids:
                     files = event.get("files", [])
                     for file_info in files:
-                        queue_manager.publish(
+                        await queue_manager.publish(
                             queue=queue_manager.PROCESSING_QUEUE,
                             message={
                                 "type": "file_processing",
@@ -129,6 +140,16 @@ class EventConsumer(BaseConsumer):
                             }
                         )
                         logger.info("file_queued_from_message", file_id=file_info.get("id"), message_id=message.message_id)
+
+                # Mark event as processed for idempotency
+                if event_id:
+                    from app.models.processed_event import ProcessedEvent
+                    db.add(ProcessedEvent(
+                        event_id=event_id,
+                        team_id=team_id,
+                        event_type="message"
+                    ))
+                    await db.commit()
 
                 return True
             except Exception as e:
@@ -261,7 +282,7 @@ class EventConsumer(BaseConsumer):
         try:
             file_info = event.get("file", {})
 
-            queue_manager.publish(
+            await queue_manager.publish(
                 queue=queue_manager.PROCESSING_QUEUE,
                 message={
                     "type": "file_processing",
@@ -291,7 +312,7 @@ class EventConsumer(BaseConsumer):
                 logger.warning("file_public_missing_id", event=str(event)[:200])
                 return True  # Don't retry
 
-            queue_manager.publish(
+            await queue_manager.publish(
                 queue=queue_manager.PROCESSING_QUEUE,
                 message={
                     "type": "file_processing",
@@ -312,7 +333,7 @@ class EventConsumer(BaseConsumer):
     async def _handle_channel_created(self, event: Dict[str, Any], team_id: str) -> bool:
         """Handle channel creation - queue for sync"""
         try:
-            queue_manager.publish(
+            await queue_manager.publish(
                 queue=queue_manager.PROCESSING_QUEUE,
                 message={
                     "type": "channel_sync",
@@ -345,7 +366,7 @@ class EventConsumer(BaseConsumer):
                     channel_id=channel_id,
                     user_id=user_id
                 )
-                queue_manager.publish(
+                await queue_manager.publish(
                     queue=queue_manager.PROCESSING_QUEUE,
                     message={
                         "type": "channel_backfill",
@@ -355,7 +376,7 @@ class EventConsumer(BaseConsumer):
                 )
             else:
                 # Regular member joined - just sync members
-                queue_manager.publish(
+                await queue_manager.publish(
                     queue=queue_manager.PROCESSING_QUEUE,
                     message={
                         "type": "member_sync",
@@ -386,7 +407,7 @@ class EventConsumer(BaseConsumer):
                     channel_id=channel_id,
                     user_id=user_id
                 )
-                queue_manager.publish(
+                await queue_manager.publish(
                     queue=queue_manager.PROCESSING_QUEUE,
                     message={
                         "type": "channel_archive",
@@ -396,7 +417,7 @@ class EventConsumer(BaseConsumer):
                 )
             else:
                 # Regular member left - just sync members
-                queue_manager.publish(
+                await queue_manager.publish(
                     queue=queue_manager.PROCESSING_QUEUE,
                     message={
                         "type": "member_sync",
