@@ -16,33 +16,27 @@ class ProcessingConsumer(BaseConsumer):
     def __init__(self):
         super().__init__(QueueManager.PROCESSING_QUEUE)
 
-    def process_message(self, message: Dict[str, Any]) -> bool:
+    async def process_message(self, message: Dict[str, Any]) -> bool:
         """Route processing tasks to appropriate handlers"""
         task_type = message.get("type")
 
         logger.info("processing_task", task_type=task_type)
 
         try:
-            # Use nest_asyncio to allow nested event loops
-            import nest_asyncio
-            nest_asyncio.apply()
-
-            loop = asyncio.get_event_loop()
-
             if task_type == "file_processing":
-                return loop.run_until_complete(self._process_file(message))
+                return await self._process_file(message)
             elif task_type == "channel_sync":
-                return loop.run_until_complete(self._sync_channel(message))
+                return await self._sync_channel(message)
             elif task_type == "channel_backfill":
-                return loop.run_until_complete(self._backfill_channel(message))
+                return await self._backfill_channel(message)
             elif task_type == "channel_archive":
-                return loop.run_until_complete(self._archive_channel(message))
+                return await self._archive_channel(message)
             elif task_type == "member_sync":
-                return loop.run_until_complete(self._sync_member(message))
+                return await self._sync_member(message)
             elif task_type == "user_sync":
-                return loop.run_until_complete(self._sync_user(message))
+                return await self._sync_user(message)
             elif task_type == "initial_workspace_indexing":
-                return loop.run_until_complete(self._index_workspace(message))
+                return await self._index_workspace(message)
             else:
                 logger.warning("unknown_task_type", task_type=task_type)
                 return True  # Don't retry unknown tasks

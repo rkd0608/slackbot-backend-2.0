@@ -42,19 +42,23 @@ def run_processing_consumer():
     from app.core.cache import cache_manager
     from app.core.queue import queue_manager
     from app.core.vector_db import vector_db_manager
+    from app.services.slack_client import slack_client_manager
+    from app.core.storage import storage_manager
 
     async def main():
         db_manager.initialize()
         await cache_manager.initialize()
-        queue_manager.initialize()  # Initialize queue_manager for publishing
+        await queue_manager.initialize()  # Initialize queue_manager for publishing
         vector_db_manager.initialize()  # Initialize Pinecone for embeddings
+        slack_client_manager.initialize()  # Initialize Slack client for file downloads
+        storage_manager.initialize()  # Initialize S3 for file storage
 
         try:
-            processing_consumer.connect()
-            processing_consumer.start_consuming()
+            await processing_consumer.connect()
+            await processing_consumer.start_consuming()
         finally:
-            processing_consumer.close()
-            queue_manager.close()
+            await processing_consumer.close()
+            await queue_manager.close()
             await db_manager.close()
             await cache_manager.close()
 

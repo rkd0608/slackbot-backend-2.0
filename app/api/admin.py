@@ -439,3 +439,181 @@ async def get_processed_events_stats(db: AsyncSession = Depends(get_db)) -> Dict
     except Exception as e:
         logger.error("processed_events_stats_error", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# FILE RECOVERY ENDPOINTS
+# ==========================================
+
+@router.get("/files/failed")
+async def get_failed_files(
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Get all files that failed processing"""
+    try:
+        from app.models.file import File
+
+        stmt = (
+            select(File)
+            .where(
+                (File.is_processed == 0) | (File.processing_error.isnot(None))
+            )
+            .order_by(File.created_at.desc())
+            .limit(limit)
+        )
+        result = await db.execute(stmt)
+        failed_files = result.scalars().all()
+
+        return {
+            "total": len(failed_files),
+            "files": [
+                {
+                    "id": file.id,
+                    "file_id": file.file_id,
+                    "filename": file.filename,
+                    "channel_id": file.channel_id,
+                    "user_id": file.user_id,
+                    "is_downloaded": bool(file.is_downloaded),
+                    "is_processed": bool(file.is_processed),
+                    "processing_error": file.processing_error,
+                    "created_at": file.created_at.isoformat() if file.created_at else None
+                }
+                for file in failed_files
+            ]
+        }
+    except Exception as e:
+        logger.error("get_failed_files_error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/files/retry-failed")
+async def retry_failed_files(
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Retry all files that failed processing"""
+    try:
+        from app.models.file import File
+        from app.models.workspace import Workspace
+
+        # Find all failed files
+        stmt = select(File).where(
+            (File.is_processed == 0) | (File.processing_error.isnot(None))
+        )
+        result = await db.execute(stmt)
+        failed_files = result.scalars().all()
+
+        if not failed_files:
+            return {
+                "status": "success",
+                "message": "No failed files found",
+                "count": 0
+            }
+
+        # Get team_id from workspace (assuming single workspace for now)
+        workspace_stmt = select(Workspace).limit(1)
+        workspace_result = await db.execute(workspace_stmt)
+        workspace = workspace_result.scalar_one_or_none()
+        team_id = workspace.team_id if workspace else "T0420EE1VQ8"
+
+        # Queue each file for reprocessing
+        queued_count = 0
+        for file in failed_files:
+            # Clear error status
+            file.processing_error = None
+            file.is_processed = 0
+            file.is_downloaded = 0
+
+            # Queue for processing
+            await queue_manager.publish(
+                queue=queue_manager.PROCESSING_QUEUE,
+                message={
+                    "type": "file_processing",
+                    "file_id": file.file_id,
+                    "file_info": {"id": file.file_id},  # Minimal info - will fetch from Slack
+                    "channel_id": file.channel_id,
+                    "user_id": file.user_id,
+                    "team_id": team_id,
+                    "message_id": file.message_id
+                }
+            )
+            queued_count += 1
+
+            logger.info(
+                "file_queued_for_retry",
+                file_id=file.file_id,
+                filename=file.filename
+            )
+
+        await db.commit()
+
+        logger.info("retry_failed_files_complete", files_queued=queued_count)
+
+        return {
+            "status": "success",
+            "message": f"Queued {queued_count} files for reprocessing",
+            "count": queued_count
+        }
+
+    except Exception as e:
+        logger.error("retry_failed_files_error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/files/retry/{file_id}")
+async def retry_single_file(
+    file_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Retry processing a single file"""
+    try:
+        from app.models.file import File
+        from app.models.workspace import Workspace
+
+        # Find the file
+        stmt = select(File).where(File.file_id == file_id)
+        result = await db.execute(stmt)
+        file = result.scalar_one_or_none()
+
+        if not file:
+            raise HTTPException(status_code=404, detail=f"File {file_id} not found")
+
+        # Get team_id from workspace
+        workspace_stmt = select(Workspace).limit(1)
+        workspace_result = await db.execute(workspace_stmt)
+        workspace = workspace_result.scalar_one_or_none()
+        team_id = workspace.team_id if workspace else "T0420EE1VQ8"
+
+        # Clear error status
+        file.processing_error = None
+        file.is_processed = 0
+        file.is_downloaded = 0
+
+        # Queue for processing
+        await queue_manager.publish(
+            queue=queue_manager.PROCESSING_QUEUE,
+            message={
+                "type": "file_processing",
+                "file_id": file.file_id,
+                "file_info": {"id": file.file_id},
+                "channel_id": file.channel_id,
+                "user_id": file.user_id,
+                "team_id": team_id,
+                "message_id": file.message_id
+            }
+        )
+
+        await db.commit()
+
+        logger.info("file_retry_queued", file_id=file_id, filename=file.filename)
+
+        return {
+            "status": "success",
+            "message": f"File {file_id} queued for reprocessing",
+            "file_id": file_id,
+            "filename": file.filename
+        }
+
+    except Exception as e:
+        logger.error("retry_single_file_error", file_id=file_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))

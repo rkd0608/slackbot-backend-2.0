@@ -16,28 +16,30 @@ class EmbeddingConsumer(BaseConsumer):
     def __init__(self):
         super().__init__(QueueManager.EMBEDDINGS_QUEUE)
 
-    def process_message(self, message: Dict[str, Any]) -> bool:
+    async def process_message(self, message: Dict[str, Any]) -> bool:
         """Process embedding generation task"""
 
         task_type = message.get("type", "message")
 
-        logger.info("embedding_task", type=task_type)
+        logger.info("embedding_task_received", type=task_type, message_keys=list(message.keys()))
 
         try:
-            # Use nest_asyncio to allow nested event loops
-            import nest_asyncio
-            nest_asyncio.apply()
-
-            loop = asyncio.get_event_loop()
-
             if task_type == "file":
-                return loop.run_until_complete(self._embed_file(message))
+                file_id = message.get("file_id")
+                logger.info("processing_file_embedding", file_id=file_id)
+                result = await self._embed_file(message)
+                logger.info("file_embedding_result", file_id=file_id, success=result)
+                return result
             else:
                 # Default: message embedding
-                return loop.run_until_complete(self._embed_message(message))
+                message_id = message.get("message_id")
+                logger.info("processing_message_embedding", message_id=message_id)
+                result = await self._embed_message(message)
+                logger.info("message_embedding_result", message_id=message_id, success=result)
+                return result
 
         except Exception as e:
-            logger.error("embedding_task_error", type=task_type, error=str(e))
+            logger.error("embedding_task_error", type=task_type, error=str(e), exc_info=True)
             return False
 
     async def _embed_message(self, message: Dict[str, Any]) -> bool:
@@ -80,10 +82,10 @@ async def main():
     vector_db_manager.initialize()
 
     try:
-        embedding_consumer.connect()
-        embedding_consumer.start_consuming()
+        await embedding_consumer.connect()
+        await embedding_consumer.start_consuming()
     finally:
-        embedding_consumer.close()
+        await embedding_consumer.close()
         await db_manager.close()
         await cache_manager.close()
 

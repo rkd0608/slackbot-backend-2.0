@@ -1,8 +1,10 @@
-"""Base class for RabbitMQ consumers"""
+"""Base class for async RabbitMQ consumers using aio_pika"""
 import json
-import pika
+import asyncio
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+import aio_pika
+from aio_pika import ExchangeType
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.queue import QueueManager
@@ -11,118 +13,121 @@ logger = get_logger(__name__)
 
 
 class BaseConsumer(ABC):
-    """Base class for RabbitMQ queue consumers"""
+    """Base class for async RabbitMQ queue consumers"""
 
     def __init__(self, queue_name: str):
         self.queue_name = queue_name
-        self.connection = None
-        self.channel = None
+        self.connection: Optional[aio_pika.RobustConnection] = None
+        self.channel: Optional[aio_pika.Channel] = None
+        self.queue: Optional[aio_pika.Queue] = None
 
-    def connect(self):
-        """Establish connection to RabbitMQ"""
-        parameters = pika.ConnectionParameters(
-            host=settings.rabbitmq_host,
-            port=settings.rabbitmq_port,
-            virtual_host=settings.rabbitmq_vhost,
-            credentials=pika.PlainCredentials(
-                settings.rabbitmq_user,
-                settings.rabbitmq_password
-            ),
-            heartbeat=600,
-            blocked_connection_timeout=300
+    async def connect(self):
+        """Establish async connection to RabbitMQ"""
+        rabbitmq_url = (
+            f"amqp://{settings.rabbitmq_user}:{settings.rabbitmq_password}"
+            f"@{settings.rabbitmq_host}:{settings.rabbitmq_port}/{settings.rabbitmq_vhost}"
         )
 
-        self.connection = pika.BlockingConnection(parameters)
-        self.channel = self.connection.channel()
+        self.connection = await aio_pika.connect_robust(
+            rabbitmq_url,
+            heartbeat=600,
+            timeout=30
+        )
 
-        # Ensure queue exists with the same arguments as declared by QueueManager
-        # Mismatched arguments (e.g., x-message-ttl) cause PRECONDITION_FAILED
-        self.channel.queue_declare(
-            queue=self.queue_name,
+        self.channel = await self.connection.channel()
+        await self.channel.set_qos(prefetch_count=1)
+
+        # Declare queue with same arguments as QueueManager
+        self.queue = await self.channel.declare_queue(
+            name=self.queue_name,
             durable=True,
             arguments={
-                'x-message-ttl': 86400000,  # 24 hours (must match app.core.queue.QueueManager)
+                'x-message-ttl': 86400000,  # 24 hours
                 'x-max-length': 100000
             }
         )
 
-        # Set QoS - prefetch 1 message at a time for fair distribution
-        self.channel.basic_qos(prefetch_count=1)
-
         logger.info("consumer_connected", queue=self.queue_name)
 
-    def start_consuming(self):
+    async def start_consuming(self):
         """Start consuming messages from queue"""
-        self.channel.basic_consume(
-            queue=self.queue_name,
-            on_message_callback=self._on_message
-        )
+        if not self.queue:
+            raise RuntimeError("Consumer not connected. Call connect() first.")
 
         logger.info("consumer_started", queue=self.queue_name)
-        try:
-            self.channel.start_consuming()
-        except KeyboardInterrupt:
-            self.channel.stop_consuming()
-            logger.info("consumer_stopped", queue=self.queue_name)
 
-    def _on_message(self, ch, method, properties, body):
+        async with self.queue.iterator() as queue_iter:
+            async for message in queue_iter:
+                async with message.process():
+                    await self._on_message(message)
+
+    async def _on_message(self, message: aio_pika.IncomingMessage):
         """Internal message handler with error handling"""
         try:
-            message = json.loads(body)
-            logger.info("message_received", queue=self.queue_name)
+            logger.info("raw_message_received", queue=self.queue_name, body_length=len(message.body))
+            body = json.loads(message.body.decode())
+            logger.info("message_received", queue=self.queue_name, message_preview=str(body)[:200], message_type=body.get("type", "unknown"))
 
             # Process message
-            success = self.process_message(message)
+            try:
+                success = await self.process_message(body)
+            except Exception as proc_error:
+                logger.error(
+                    "process_message_exception",
+                    queue=self.queue_name,
+                    error=str(proc_error),
+                    error_type=type(proc_error).__name__
+                )
+                success = False
 
             if success:
-                # Acknowledge message
-                ch.basic_ack(delivery_tag=method.delivery_tag)
+                # Message auto-ACKed by async with message.process()
                 logger.info("message_processed", queue=self.queue_name)
             else:
-                # Reject and requeue (or send to DLQ after retries)
-                retry_count = properties.headers.get('x-retry-count', 0) if properties.headers else 0
+                # Get retry count from headers
+                retry_count = 0
+                if message.headers and 'x-retry-count' in message.headers:
+                    retry_count = message.headers['x-retry-count']
 
                 if retry_count < 3:
                     # Requeue with incremented retry count
-                    headers = properties.headers or {}
+                    headers = message.headers or {}
                     headers['x-retry-count'] = retry_count + 1
 
-                    ch.basic_publish(
-                        exchange='',
-                        routing_key=self.queue_name,
-                        body=body,
-                        properties=pika.BasicProperties(
-                            delivery_mode=2,
+                    await self.channel.default_exchange.publish(
+                        aio_pika.Message(
+                            body=message.body,
+                            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
                             headers=headers
-                        )
+                        ),
+                        routing_key=self.queue_name
                     )
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
                     logger.warning("message_requeued", queue=self.queue_name, retry=retry_count + 1)
                 else:
                     # Send to DLQ
-                    ch.basic_publish(
-                        exchange='',
-                        routing_key=QueueManager.DLQ_QUEUE,
-                        body=body,
-                        properties=pika.BasicProperties(delivery_mode=2)
+                    await self.channel.default_exchange.publish(
+                        aio_pika.Message(
+                            body=message.body,
+                            delivery_mode=aio_pika.DeliveryMode.PERSISTENT
+                        ),
+                        routing_key=QueueManager.DLQ_QUEUE
                     )
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
                     logger.error("message_moved_to_dlq", queue=self.queue_name)
 
         except json.JSONDecodeError as e:
             logger.error("message_decode_error", error=str(e))
-            ch.basic_ack(delivery_tag=method.delivery_tag)
+            # Auto-ACKed, message discarded
         except Exception as e:
             logger.error("message_processing_error", error=str(e))
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+            # Auto-NACKed by context manager on exception
 
     @abstractmethod
-    def process_message(self, message: Dict[str, Any]) -> bool:
+    async def process_message(self, message: Dict[str, Any]) -> bool:
         """Process a single message - must be implemented by subclass"""
         pass
 
-    def close(self):
+    async def close(self):
         """Close connection"""
         if self.connection and not self.connection.is_closed:
-            self.connection.close()
+            await self.connection.close()
             logger.info("consumer_closed", queue=self.queue_name)

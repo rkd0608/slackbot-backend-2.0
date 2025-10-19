@@ -137,6 +137,15 @@ class SlackClientManager:
             logger.error("channel_members_error", channel_id=channel_id, error=str(e))
             return []
 
+    async def get_file_info(self, file_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch file information from Slack API"""
+        try:
+            response = self.client.files_info(file=file_id)
+            return response["file"]
+        except SlackApiError as e:
+            logger.error("file_info_error", file_id=file_id, error=str(e))
+            return None
+
     async def download_file(self, url: str) -> Optional[bytes]:
         """Download file from Slack"""
         try:
