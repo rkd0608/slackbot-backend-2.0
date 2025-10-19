@@ -17,19 +17,19 @@ async def main():
 
     db_manager.initialize()
     await cache_manager.initialize()
-    queue_manager.initialize()  # Initialize queue_manager for publishing
+    await queue_manager.initialize()  # Initialize queue_manager for publishing
     slack_client_manager.initialize()  # Initialize Slack client for bot interactions
     vector_db_manager.initialize()  # Initialize Pinecone for retrieval
 
     try:
-        event_consumer.connect()
+        await event_consumer.connect()
         logger.info("event_consumer_ready")
-        event_consumer.start_consuming()
+        await event_consumer.start_consuming()
     except KeyboardInterrupt:
         logger.info("event_consumer_shutdown")
     finally:
-        event_consumer.close()
-        queue_manager.close()
+        await event_consumer.close()
+        await queue_manager.close()
         await db_manager.close()
         await cache_manager.close()
 

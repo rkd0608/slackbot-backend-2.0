@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     api_port: int = Field(default=8000)
     workers: int = Field(default=4)
     app_base_url: str = Field(default="http://localhost:8000")
+    frontend_url: str = Field(default="http://localhost:3001")  # Next.js frontend URL
 
     # Slack Configuration
     slack_bot_token: str = Field(..., min_length=1)

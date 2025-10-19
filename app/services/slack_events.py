@@ -7,6 +7,8 @@ from fastapi import Request, HTTPException
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.queue import queue_manager
+from app.core.database import db_manager
+from app.models.event_buffer import EventBuffer, EventBufferStatus
 
 logger = get_logger(__name__)
 
@@ -35,6 +37,25 @@ class SlackEventHandler:
 
         return hmac.compare_digest(my_signature, signature)
 
+    async def _store_event_in_buffer(self, event_data: Dict[str, Any], event_id: str, team_id: str, event_type: str, error: str = None):
+        """Store event in buffer database for retry"""
+        try:
+            async with db_manager.AsyncSessionLocal() as db:
+                buffer_entry = EventBuffer(
+                    event_id=event_id,
+                    team_id=team_id,
+                    event_type=event_type,
+                    event_data=event_data,
+                    status=EventBufferStatus.PENDING,
+                    retry_count=0,
+                    error_message=error
+                )
+                db.add(buffer_entry)
+                await db.commit()
+                logger.info("event_buffered", event_id=event_id, team_id=team_id, event_type=event_type)
+        except Exception as e:
+            logger.error("event_buffer_storage_failed", event_id=event_id, error=str(e))
+
     async def handle_event(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process incoming Slack event"""
         event_type = event_data.get("type")
@@ -52,16 +73,23 @@ class SlackEventHandler:
 
             logger.info("app_uninstalled", team_id=team_id)
 
-            # Queue uninstallation handler
-            await queue_manager.publish(
-                queue=queue_manager.EVENTS_QUEUE,
-                message={
-                    "event_type": "app_uninstalled",
-                    "team_id": team_id,
-                    "event_time": event_data.get("event_time")
-                },
-                routing_key="slack.event.app_uninstalled"
-            )
+            # Try to queue, fallback to buffer on failure
+            try:
+                success = await queue_manager.publish(
+                    queue=queue_manager.EVENTS_QUEUE,
+                    message={
+                        "event_type": "app_uninstalled",
+                        "team_id": team_id,
+                        "event_time": event_data.get("event_time")
+                    },
+                    routing_key="slack.event.app_uninstalled"
+                )
+                if not success:
+                    await self._store_event_in_buffer(event_data, None, team_id, "app_uninstalled", "Queue publish failed")
+            except Exception as e:
+                logger.error("queue_publish_error", error=str(e))
+                await self._store_event_in_buffer(event_data, None, team_id, "app_uninstalled", str(e))
+
             return {"status": "ok"}
 
         if event_type == "tokens_revoked":
@@ -72,17 +100,24 @@ class SlackEventHandler:
 
             logger.info("tokens_revoked", team_id=team_id)
 
-            # Queue token revocation handler
-            await queue_manager.publish(
-                queue=queue_manager.EVENTS_QUEUE,
-                message={
-                    "event_type": "tokens_revoked",
-                    "team_id": team_id,
-                    "tokens": event_data.get("tokens", {}),
-                    "event_time": event_data.get("event_time")
-                },
-                routing_key="slack.event.tokens_revoked"
-            )
+            # Try to queue, fallback to buffer on failure
+            try:
+                success = await queue_manager.publish(
+                    queue=queue_manager.EVENTS_QUEUE,
+                    message={
+                        "event_type": "tokens_revoked",
+                        "team_id": team_id,
+                        "tokens": event_data.get("tokens", {}),
+                        "event_time": event_data.get("event_time")
+                    },
+                    routing_key="slack.event.tokens_revoked"
+                )
+                if not success:
+                    await self._store_event_in_buffer(event_data, None, team_id, "tokens_revoked", "Queue publish failed")
+            except Exception as e:
+                logger.error("queue_publish_error", error=str(e))
+                await self._store_event_in_buffer(event_data, None, team_id, "tokens_revoked", str(e))
+
             return {"status": "ok"}
 
         # Event callback
@@ -90,28 +125,40 @@ class SlackEventHandler:
             event = event_data.get("event", {})
             event_subtype = event.get("type")
             team_id = event_data.get("team_id")
+            event_id = event_data.get("event_id")
 
             logger.info(
                 "slack_event_received",
                 event_type=event_subtype,
                 team_id=team_id,
                 channel=event.get("channel"),
-                user=event.get("user")
+                user=event.get("user"),
+                event_id=event_id
             )
 
-            # Route event to appropriate queue with team_id for workspace isolation
+            # Try to route event to queue, fallback to buffer on failure
             routing_key = f"slack.event.{event_subtype}"
-            await queue_manager.publish(
-                queue=queue_manager.EVENTS_QUEUE,
-                message={
-                    "event": event,
-                    "team_id": team_id,
-                    "event_id": event_data.get("event_id"),
-                    "event_time": event_data.get("event_time")
-                },
-                routing_key=routing_key
-            )
+            try:
+                success = await queue_manager.publish(
+                    queue=queue_manager.EVENTS_QUEUE,
+                    message={
+                        "event": event,
+                        "team_id": team_id,
+                        "event_id": event_id,
+                        "event_time": event_data.get("event_time")
+                    },
+                    routing_key=routing_key
+                )
 
+                if not success:
+                    # Queue publish returned False - store in buffer
+                    await self._store_event_in_buffer(event_data, event_id, team_id, event_subtype, "Queue publish failed")
+            except Exception as e:
+                # Exception during publish - store in buffer
+                logger.error("queue_publish_exception", error=str(e), event_id=event_id)
+                await self._store_event_in_buffer(event_data, event_id, team_id, event_subtype, str(e))
+
+            # Always return OK to Slack (event is either queued or buffered)
             return {"status": "ok"}
 
         logger.warning("unknown_event_type", event_type=event_type)

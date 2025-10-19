@@ -579,3 +579,264 @@ async def get_billing_info(
     except Exception as e:
         logger.error("billing_info_error", error=str(e), team_id=team_id)
         raise HTTPException(status_code=500, detail="Failed to load billing info")
+
+
+# Analytics Response Models
+class QueriesMetricCard(BaseModel):
+    """Queries answered this week metric"""
+    count: int
+    percentage_change: float
+    trend: str  # 'up', 'down', or 'neutral'
+    comparison_period: str = "vs last week"
+
+
+class AccuracyFeedbackCard(BaseModel):
+    """Accuracy feedback metric"""
+    accuracy_percentage: float
+    percentage_change: float
+    trend: str
+    total_ratings: int
+
+
+class MonitoredChannelsCard(BaseModel):
+    """Monitored channels metric"""
+    count: int
+
+
+class QueriesOverTimeData(BaseModel):
+    """Timeline data for queries graph"""
+    labels: List[str]  # ['Mon', 'Tue', 'Wed', ...]
+    this_week: List[int]
+    last_week: List[int]
+
+
+class WorkspaceInsights(BaseModel):
+    """Workspace insights"""
+    top_searched_topics: List[Dict[str, Any]]
+    most_active_user: Optional[Dict[str, Any]]
+    most_indexed_channel: Optional[Dict[str, Any]]
+
+
+class HomeAnalyticsResponse(BaseModel):
+    """Complete home dashboard analytics response"""
+    queries_this_week: QueriesMetricCard
+    accuracy_feedback: AccuracyFeedbackCard
+    monitored_channels: MonitoredChannelsCard
+    queries_over_time: QueriesOverTimeData
+    insights: WorkspaceInsights
+
+
+@router.get("/admin/dashboard/home/{team_id}", response_model=HomeAnalyticsResponse)
+async def get_home_analytics(
+    team_id: str,
+    current_user: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get complete home dashboard analytics
+
+    Includes:
+    - Queries answered this week (with % change)
+    - Accuracy feedback overall (with % change)
+    - Number of channels monitored
+    - Queries over time graph data (7 days comparison)
+    - Workspace insights (top topics, active user, indexed channel)
+    """
+
+    # Verify user has access
+    if current_user.team_id != team_id:
+        raise HTTPException(status_code=403, detail="Access denied to this workspace")
+
+    try:
+        from app.services.analytics_service import analytics_service
+
+        # Get all metrics in parallel (conceptually - SQLAlchemy doesn't support true parallelism)
+        # But we can gather results sequentially
+        queries_count, queries_change, queries_trend = await analytics_service.get_queries_this_week(team_id, db)
+        accuracy_pct, accuracy_change, accuracy_trend, total_ratings = await analytics_service.get_accuracy_feedback(team_id, db)
+        monitored_count = await analytics_service.get_monitored_channels_count(team_id, db)
+        queries_timeline = await analytics_service.get_queries_over_time(team_id, db)
+        top_topics = await analytics_service.get_top_searched_topics(team_id, 5, db)
+        most_active_user = await analytics_service.get_most_active_user(team_id, db)
+        most_indexed_channel = await analytics_service.get_most_indexed_channel(team_id, db)
+
+        return HomeAnalyticsResponse(
+            queries_this_week=QueriesMetricCard(
+                count=queries_count,
+                percentage_change=queries_change,
+                trend=queries_trend,
+                comparison_period="vs last week"
+            ),
+            accuracy_feedback=AccuracyFeedbackCard(
+                accuracy_percentage=accuracy_pct,
+                percentage_change=accuracy_change,
+                trend=accuracy_trend,
+                total_ratings=total_ratings
+            ),
+            monitored_channels=MonitoredChannelsCard(
+                count=monitored_count
+            ),
+            queries_over_time=QueriesOverTimeData(
+                labels=queries_timeline["labels"],
+                this_week=queries_timeline["this_week"],
+                last_week=queries_timeline["last_week"]
+            ),
+            insights=WorkspaceInsights(
+                top_searched_topics=top_topics,
+                most_active_user=most_active_user,
+                most_indexed_channel=most_indexed_channel
+            )
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("home_analytics_error", error=str(e), team_id=team_id)
+        raise HTTPException(status_code=500, detail="Failed to load home analytics")
+
+
+# Analytics & Usage Insights Response Models
+class ActiveUsersCard(BaseModel):
+    """Active users metric"""
+    count: int
+    percentage_change: float
+    trend: str
+    comparison_period: str = "vs last week"
+
+
+class TimeSavedCard(BaseModel):
+    """Time saved metric"""
+    hours_saved: float
+    percentage_change: float
+    trend: str
+    comparison_period: str = "vs last week"
+
+
+class QueriesSingleWeekData(BaseModel):
+    """Timeline data for single week queries graph"""
+    labels: List[str]  # ['Mon', 'Tue', 'Wed', ...]
+    data: List[int]
+
+
+class FeedbackDistribution(BaseModel):
+    """Feedback distribution for pie chart"""
+    positive: int
+    negative: int
+    no_response: int
+
+
+class TopActiveUser(BaseModel):
+    """Top active user data"""
+    user_id: str
+    display_name: str
+    query_count: int
+    accuracy_percentage: Optional[float]
+
+
+class UserAdoption(BaseModel):
+    """User adoption metrics"""
+    top_users: List[TopActiveUser]
+
+
+class AnalyticsInsightsResponse(BaseModel):
+    """Complete Analytics & Usage Insights page response"""
+    total_queries: QueriesMetricCard
+    active_users: ActiveUsersCard
+    accuracy_feedback: AccuracyFeedbackCard
+    time_saved: TimeSavedCard
+    queries_over_time: QueriesSingleWeekData
+    top_searched_topics: List[Dict[str, Any]]
+    feedback_distribution: FeedbackDistribution
+    user_adoption: UserAdoption
+
+
+@router.get("/admin/dashboard/analytics-insights/{team_id}", response_model=AnalyticsInsightsResponse)
+async def get_analytics_insights(
+    team_id: str,
+    current_user: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get complete Analytics & Usage Insights page data
+
+    Includes:
+    - Total queries (with % change)
+    - Active users count (with % change)
+    - Accuracy feedback (with % change)
+    - Total time saved this week (with % change)
+    - Queries over time graph (single week)
+    - Top searched topics histogram
+    - Feedback distribution pie chart
+    - User adoption: Top 5 most active users with query count and accuracy
+    """
+
+    # Verify user has access
+    if current_user.team_id != team_id:
+        raise HTTPException(status_code=403, detail="Access denied to this workspace")
+
+    try:
+        from app.services.analytics_service import analytics_service
+
+        # Get all metrics
+        queries_count, queries_change, queries_trend = await analytics_service.get_queries_this_week(team_id, db)
+        active_users_count, active_users_change, active_users_trend = await analytics_service.get_active_users_count(team_id, db)
+        accuracy_pct, accuracy_change, accuracy_trend, total_ratings = await analytics_service.get_accuracy_feedback(team_id, db)
+        time_saved, time_saved_change, time_saved_trend = await analytics_service.get_time_saved_this_week(team_id, db)
+        queries_single_week = await analytics_service.get_queries_single_week(team_id, db)
+        top_topics = await analytics_service.get_top_searched_topics(team_id, 10, db)
+        feedback_dist = await analytics_service.get_feedback_distribution(team_id, db)
+        top_5_users = await analytics_service.get_top_active_users(team_id, 5, db)
+
+        return AnalyticsInsightsResponse(
+            total_queries=QueriesMetricCard(
+                count=queries_count,
+                percentage_change=queries_change,
+                trend=queries_trend,
+                comparison_period="vs last week"
+            ),
+            active_users=ActiveUsersCard(
+                count=active_users_count,
+                percentage_change=active_users_change,
+                trend=active_users_trend,
+                comparison_period="vs last week"
+            ),
+            accuracy_feedback=AccuracyFeedbackCard(
+                accuracy_percentage=accuracy_pct,
+                percentage_change=accuracy_change,
+                trend=accuracy_trend,
+                total_ratings=total_ratings
+            ),
+            time_saved=TimeSavedCard(
+                hours_saved=time_saved,
+                percentage_change=time_saved_change,
+                trend=time_saved_trend,
+                comparison_period="vs last week"
+            ),
+            queries_over_time=QueriesSingleWeekData(
+                labels=queries_single_week["labels"],
+                data=queries_single_week["data"]
+            ),
+            top_searched_topics=top_topics,
+            feedback_distribution=FeedbackDistribution(
+                positive=feedback_dist["positive"],
+                negative=feedback_dist["negative"],
+                no_response=feedback_dist["no_response"]
+            ),
+            user_adoption=UserAdoption(
+                top_users=[
+                    TopActiveUser(
+                        user_id=user["user_id"],
+                        display_name=user["display_name"],
+                        query_count=user["query_count"],
+                        accuracy_percentage=user["accuracy_percentage"]
+                    )
+                    for user in top_5_users
+                ]
+            )
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("analytics_insights_error", error=str(e), team_id=team_id)
+        raise HTTPException(status_code=500, detail="Failed to load analytics insights")

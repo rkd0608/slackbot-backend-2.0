@@ -188,10 +188,15 @@ Return ONLY valid JSON, no explanation."""
         # If relative_days provided, calculate dates
         if temporal.get("relative_days") is not None:
             days = temporal["relative_days"]
-            if days < 0:  # Past
+            if days == 0:  # Today - special case for full day range
+                # Start of today (00:00:00)
+                result["start_date"] = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                # End of today (23:59:59)
+                result["end_date"] = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+            elif days < 0:  # Past
                 result["start_date"] = now + timedelta(days=days)
                 result["end_date"] = now
-            else:  # Future
+            else:  # Future (positive days)
                 result["start_date"] = now
                 result["end_date"] = now + timedelta(days=days)
 

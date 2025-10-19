@@ -53,6 +53,7 @@ class User(Base):
     password_hash = Column(Text, nullable=True)  # For password-based auth
     role = Column(String(50), default='member', nullable=False)  # admin, member, viewer
     last_login_at = Column(DateTime, nullable=True)
+    profile_completed = Column(Integer, default=0, nullable=False)  # 0=incomplete, 1=complete (onboarding)
 
     # Timestamps
     slack_created_at = Column(DateTime, nullable=True)

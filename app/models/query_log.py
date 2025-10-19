@@ -15,6 +15,7 @@ class QueryLog(Base):
     # Query identification
     query_id = Column(String(100), unique=True, nullable=False, index=True)
     user_id = Column(String(50), nullable=False, index=True)
+    team_id = Column(String(50), nullable=False, index=True)  # Workspace identification
 
     # Query details
     query_text = Column(Text, nullable=False)
@@ -60,9 +61,13 @@ class QueryLog(Base):
     cache_key = Column(String(255), nullable=True)
 
     # User feedback
-    user_rating = Column(Integer, nullable=True)  # 1-5 or thumbs up/down
+    user_rating = Column(Integer, nullable=True)  # 1=thumbs_down, 5=thumbs_up
+    feedback_type = Column(String(20), nullable=True)  # 'positive', 'negative', 'neutral'
     user_clicked_results = Column(JSON, nullable=True)  # Which results were clicked
     user_copied_content = Column(Integer, default=0)
+
+    # Topic extraction for analytics
+    topic_tags = Column(JSON, nullable=True)  # Extracted topics/keywords from query
 
     # Response
     response_text = Column(Text, nullable=True)
@@ -74,4 +79,6 @@ class QueryLog(Base):
     __table_args__ = (
         Index('idx_user_created', 'user_id', 'created_at'),
         Index('idx_intent_created', 'intent_type', 'created_at'),
+        Index('idx_team_created', 'team_id', 'created_at'),
+        Index('idx_team_rating', 'team_id', 'user_rating'),
     )

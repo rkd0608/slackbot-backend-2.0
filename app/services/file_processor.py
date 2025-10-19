@@ -43,14 +43,58 @@ class FileProcessor:
             logger.error("file_processing_missing_id", file_info=str(file_info)[:200])
             return None
 
+        # If file_info only has minimal data (just id), fetch complete info from Slack
+        if not file_info.get("url_private"):
+            logger.info("fetching_complete_file_info", file_id=file_id)
+            complete_file_info = await slack_client_manager.get_file_info(file_id)
+            if complete_file_info:
+                file_info = complete_file_info
+            else:
+                logger.error("failed_to_fetch_file_info", file_id=file_id)
+                return None
+
         # Check if already processed
         result = await db.execute(
             select(File).where(File.file_id == file_id)
         )
         existing = result.scalar_one_or_none()
 
-        if existing and existing.is_processed:
-            logger.info("file_already_processed", file_id=file_id)
+        # If file is processed but missing embedding, queue it
+        if existing and existing.is_processed and existing.vector_id is not None:
+            logger.info("file_already_processed", file_id=file_id, has_embedding=True)
+            return existing
+
+        # If file is processed but missing embedding, queue it directly
+        if existing and existing.is_processed and existing.vector_id is None:
+            logger.info("file_processed_but_missing_embedding", file_id=file_id)
+
+            # Get extracted text from S3 or database
+            extracted_text = existing.extracted_text
+            if not extracted_text and existing.s3_text_key:
+                # Try to fetch from S3
+                text_data = storage_manager.download_file(existing.s3_text_key)
+                if text_data:
+                    extracted_text = text_data.decode('utf-8')
+                    logger.info("fetched_text_from_s3", file_id=file_id, text_length=len(extracted_text))
+
+            if extracted_text:
+                # Queue for embedding generation (send file_id only, not full text)
+                logger.info("queueing_file_for_embedding", file_id=file_id, text_length=len(extracted_text))
+                publish_success = await queue_manager.publish(
+                    queue=queue_manager.EMBEDDINGS_QUEUE,
+                    message={
+                        "type": "file",
+                        "file_id": file_id,
+                        "channel_id": channel_id
+                    }
+                )
+                if publish_success:
+                    logger.info("file_queued_for_embedding", file_id=file_id)
+                else:
+                    logger.error("failed_to_queue_embedding", file_id=file_id)
+            else:
+                logger.warning("no_text_available_for_embedding", file_id=file_id)
+
             return existing
 
         # Create or update file record
@@ -139,16 +183,20 @@ class FileProcessor:
                 file_record.extracted_text = extracted_text[:10000]  # Store preview in DB
                 file_record.s3_text_key = text_key
 
-                # Queue for embedding generation
-                queue_manager.publish(
+                # Queue for embedding generation (send file_id only, not full text to avoid message size issues)
+                logger.info("queueing_file_for_embedding", file_id=file_id, text_length=len(extracted_text))
+                publish_success = await queue_manager.publish(
                     queue=queue_manager.EMBEDDINGS_QUEUE,
                     message={
                         "type": "file",
                         "file_id": file_id,
-                        "text": extracted_text,
                         "channel_id": channel_id
                     }
                 )
+                if publish_success:
+                    logger.info("file_queued_for_embedding", file_id=file_id)
+                else:
+                    logger.error("failed_to_queue_embedding", file_id=file_id)
 
             file_record.is_processed = 1
             await db.commit()

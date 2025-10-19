@@ -1,11 +1,17 @@
 """Admin endpoints for backfill and sync operations"""
-from typing import Dict, Any, Optional
-from fastapi import APIRouter, Depends, BackgroundTasks
+from typing import Dict, Any, Optional, List
+from datetime import datetime, timedelta
+from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, delete
 from app.core.database import get_db
 from app.services.backfill_service import backfill_service
 from app.services.sync_service import sync_service
+from app.services.event_buffer_service import event_buffer_service
+from app.core.queue import queue_manager
 from app.core.logging import get_logger
+from app.models.event_buffer import EventBuffer, EventBufferStatus
+from app.models.processed_event import ProcessedEvent
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -125,3 +131,489 @@ async def sync_user(
         }
     else:
         return {"status": "failed", "user_id": user_id}
+
+
+# ==========================================
+# EMERGENCY RECOVERY & MONITORING ENDPOINTS
+# ==========================================
+
+@router.get("/health")
+async def system_health(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
+    """
+    Overall system health check
+    Shows status of queues, event buffer, workers, and dependencies
+    """
+    try:
+        # Get buffer stats
+        buffer_stats = await event_buffer_service.get_buffer_stats()
+
+        # Get processed events count (last 24h)
+        from datetime import datetime, timedelta
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        processed_count_stmt = select(func.count(ProcessedEvent.event_id)).where(
+            ProcessedEvent.processed_at >= cutoff
+        )
+        result = await db.execute(processed_count_stmt)
+        processed_24h = result.scalar()
+
+        # Check queue manager initialization
+        queue_status = "healthy" if queue_manager._initialized else "not_initialized"
+
+        return {
+            "status": "healthy" if buffer_stats.get("failed", 0) == 0 else "degraded",
+            "timestamp": datetime.utcnow().isoformat(),
+            "event_buffer": {
+                "pending": buffer_stats.get("pending", 0),
+                "queued": buffer_stats.get("queued", 0),
+                "failed": buffer_stats.get("failed", 0),
+                "total": buffer_stats.get("total", 0),
+                "status": "ok" if buffer_stats.get("failed", 0) == 0 else "⚠️ has_failures"
+            },
+            "events_processed_24h": processed_24h,
+            "rabbitmq": {
+                "status": queue_status,
+                "initialized": queue_manager._initialized
+            },
+            "database": "healthy",
+            "alerts": [
+                "⚠️ Event buffer has failed events" if buffer_stats.get("failed", 0) > 0 else None,
+                "⚠️ Too many pending events" if buffer_stats.get("pending", 0) > 100 else None
+            ]
+        }
+    except Exception as e:
+        logger.error("health_check_error", error=str(e))
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@router.get("/buffer/stats")
+async def get_buffer_stats() -> Dict[str, Any]:
+    """Get event buffer statistics"""
+    return await event_buffer_service.get_buffer_stats()
+
+
+@router.get("/buffer/failed")
+async def get_failed_buffered_events(
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Get all failed buffered events that need manual review"""
+    try:
+        stmt = (
+            select(EventBuffer)
+            .where(EventBuffer.status == EventBufferStatus.FAILED)
+            .order_by(EventBuffer.created_at.desc())
+            .limit(limit)
+        )
+        result = await db.execute(stmt)
+        failed_events = result.scalars().all()
+
+        return {
+            "total": len(failed_events),
+            "events": [
+                {
+                    "id": event.id,
+                    "event_id": event.event_id,
+                    "team_id": event.team_id,
+                    "event_type": event.event_type,
+                    "retry_count": event.retry_count,
+                    "error_message": event.error_message,
+                    "created_at": event.created_at.isoformat(),
+                    "event_data": event.event_data
+                }
+                for event in failed_events
+            ]
+        }
+    except Exception as e:
+        logger.error("get_failed_buffered_events_error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/buffer/retry/{buffer_id}")
+async def retry_single_buffered_event(
+    buffer_id: int,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Manually retry a single buffered event"""
+    try:
+        # Get the buffered event
+        result = await db.execute(
+            select(EventBuffer).where(EventBuffer.id == buffer_id)
+        )
+        event = result.scalar_one_or_none()
+
+        if not event:
+            raise HTTPException(status_code=404, detail=f"Buffered event {buffer_id} not found")
+
+        # Try to republish
+        event_data = event.event_data
+
+        # Determine routing key
+        if event.event_type in ["app_uninstalled", "tokens_revoked"]:
+            routing_key = f"slack.event.{event.event_type}"
+            message = {
+                "event_type": event.event_type,
+                "team_id": event.team_id,
+                "event_time": event_data.get("event_time")
+            }
+            if event.event_type == "tokens_revoked":
+                message["tokens"] = event_data.get("tokens", {})
+        else:
+            slack_event = event_data.get("event", {})
+            routing_key = f"slack.event.{event.event_type}"
+            message = {
+                "event": slack_event,
+                "team_id": event.team_id,
+                "event_id": event.event_id,
+                "event_time": event_data.get("event_time")
+            }
+
+        success = await queue_manager.publish(
+            queue=queue_manager.EVENTS_QUEUE,
+            message=message,
+            routing_key=routing_key
+        )
+
+        if success:
+            event.status = EventBufferStatus.QUEUED
+            event.processed_at = datetime.utcnow()
+            await db.commit()
+
+            logger.info("manual_buffer_retry_success", buffer_id=buffer_id)
+            return {
+                "status": "success",
+                "buffer_id": buffer_id,
+                "message": "Event successfully requeued"
+            }
+        else:
+            logger.error("manual_buffer_retry_failed", buffer_id=buffer_id)
+            return {
+                "status": "failed",
+                "buffer_id": buffer_id,
+                "message": "Queue publish returned False"
+            }
+
+    except Exception as e:
+        logger.error("retry_buffered_event_error", buffer_id=buffer_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/buffer/retry-failed")
+async def retry_all_failed_buffered_events(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
+    """Retry all failed buffered events (use after fixing the root cause)"""
+    try:
+        # Reset all failed events to pending with retry_count = 0
+        stmt = (
+            select(EventBuffer)
+            .where(EventBuffer.status == EventBufferStatus.FAILED)
+        )
+        result = await db.execute(stmt)
+        failed_events = result.scalars().all()
+
+        for event in failed_events:
+            event.status = EventBufferStatus.PENDING
+            event.retry_count = 0
+            event.error_message = "Manually reset for retry"
+
+        await db.commit()
+
+        logger.info("manual_retry_all_failed", count=len(failed_events))
+
+        return {
+            "status": "success",
+            "message": f"Reset {len(failed_events)} failed events to pending. They will be retried by the background job.",
+            "count": len(failed_events)
+        }
+
+    except Exception as e:
+        logger.error("retry_all_failed_error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/buffer/pending")
+async def get_pending_buffered_events(
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Get all pending buffered events"""
+    try:
+        stmt = (
+            select(EventBuffer)
+            .where(EventBuffer.status == EventBufferStatus.PENDING)
+            .order_by(EventBuffer.created_at.desc())
+            .limit(limit)
+        )
+        result = await db.execute(stmt)
+        pending_events = result.scalars().all()
+
+        return {
+            "total": len(pending_events),
+            "events": [
+                {
+                    "id": event.id,
+                    "event_id": event.event_id,
+                    "team_id": event.team_id,
+                    "event_type": event.event_type,
+                    "retry_count": event.retry_count,
+                    "created_at": event.created_at.isoformat()
+                }
+                for event in pending_events
+            ]
+        }
+    except Exception as e:
+        logger.error("get_pending_buffered_events_error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/buffer/cleanup")
+async def cleanup_old_buffered_events(
+    days: int = 7,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Clean up old queued/failed buffered events"""
+    try:
+        from datetime import datetime, timedelta
+        from sqlalchemy import delete
+
+        cutoff_date = datetime.utcnow() - timedelta(days=days)
+
+        # Delete old queued events (successfully processed)
+        stmt = delete(EventBuffer).where(
+            EventBuffer.status == EventBufferStatus.QUEUED,
+            EventBuffer.processed_at < cutoff_date
+        )
+        result = await db.execute(stmt)
+        await db.commit()
+
+        deleted_count = result.rowcount
+
+        logger.info("buffer_cleanup_completed", deleted=deleted_count, days=days)
+
+        return {
+            "status": "success",
+            "deleted": deleted_count,
+            "cutoff_days": days
+        }
+
+    except Exception as e:
+        logger.error("buffer_cleanup_error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/processed-events/stats")
+async def get_processed_events_stats(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
+    """Get statistics about processed events (for deduplication tracking)"""
+    try:
+        from datetime import datetime, timedelta
+
+        # Total processed events
+        total_stmt = select(func.count(ProcessedEvent.event_id))
+        total_result = await db.execute(total_stmt)
+        total = total_result.scalar()
+
+        # Last 24 hours
+        cutoff_24h = datetime.utcnow() - timedelta(hours=24)
+        last_24h_stmt = select(func.count(ProcessedEvent.event_id)).where(
+            ProcessedEvent.processed_at >= cutoff_24h
+        )
+        result_24h = await db.execute(last_24h_stmt)
+        last_24h = result_24h.scalar()
+
+        # Last 7 days
+        cutoff_7d = datetime.utcnow() - timedelta(days=7)
+        last_7d_stmt = select(func.count(ProcessedEvent.event_id)).where(
+            ProcessedEvent.processed_at >= cutoff_7d
+        )
+        result_7d = await db.execute(last_7d_stmt)
+        last_7d = result_7d.scalar()
+
+        return {
+            "total_processed_events": total,
+            "last_24_hours": last_24h,
+            "last_7_days": last_7d,
+            "cleanup_policy": "Events older than 7 days are automatically cleaned up"
+        }
+
+    except Exception as e:
+        logger.error("processed_events_stats_error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# FILE RECOVERY ENDPOINTS
+# ==========================================
+
+@router.get("/files/failed")
+async def get_failed_files(
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Get all files that failed processing"""
+    try:
+        from app.models.file import File
+
+        stmt = (
+            select(File)
+            .where(
+                (File.is_processed == 0) | (File.processing_error.isnot(None))
+            )
+            .order_by(File.created_at.desc())
+            .limit(limit)
+        )
+        result = await db.execute(stmt)
+        failed_files = result.scalars().all()
+
+        return {
+            "total": len(failed_files),
+            "files": [
+                {
+                    "id": file.id,
+                    "file_id": file.file_id,
+                    "filename": file.filename,
+                    "channel_id": file.channel_id,
+                    "user_id": file.user_id,
+                    "is_downloaded": bool(file.is_downloaded),
+                    "is_processed": bool(file.is_processed),
+                    "processing_error": file.processing_error,
+                    "created_at": file.created_at.isoformat() if file.created_at else None
+                }
+                for file in failed_files
+            ]
+        }
+    except Exception as e:
+        logger.error("get_failed_files_error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/files/retry-failed")
+async def retry_failed_files(
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Retry all files that failed processing"""
+    try:
+        from app.models.file import File
+        from app.models.workspace import Workspace
+
+        # Find all failed files
+        stmt = select(File).where(
+            (File.is_processed == 0) | (File.processing_error.isnot(None))
+        )
+        result = await db.execute(stmt)
+        failed_files = result.scalars().all()
+
+        if not failed_files:
+            return {
+                "status": "success",
+                "message": "No failed files found",
+                "count": 0
+            }
+
+        # Get team_id from workspace (assuming single workspace for now)
+        workspace_stmt = select(Workspace).limit(1)
+        workspace_result = await db.execute(workspace_stmt)
+        workspace = workspace_result.scalar_one_or_none()
+        team_id = workspace.team_id if workspace else "T0420EE1VQ8"
+
+        # Queue each file for reprocessing
+        queued_count = 0
+        for file in failed_files:
+            # Clear error status
+            file.processing_error = None
+            file.is_processed = 0
+            file.is_downloaded = 0
+
+            # Queue for processing
+            await queue_manager.publish(
+                queue=queue_manager.PROCESSING_QUEUE,
+                message={
+                    "type": "file_processing",
+                    "file_id": file.file_id,
+                    "file_info": {"id": file.file_id},  # Minimal info - will fetch from Slack
+                    "channel_id": file.channel_id,
+                    "user_id": file.user_id,
+                    "team_id": team_id,
+                    "message_id": file.message_id
+                }
+            )
+            queued_count += 1
+
+            logger.info(
+                "file_queued_for_retry",
+                file_id=file.file_id,
+                filename=file.filename
+            )
+
+        await db.commit()
+
+        logger.info("retry_failed_files_complete", files_queued=queued_count)
+
+        return {
+            "status": "success",
+            "message": f"Queued {queued_count} files for reprocessing",
+            "count": queued_count
+        }
+
+    except Exception as e:
+        logger.error("retry_failed_files_error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/files/retry/{file_id}")
+async def retry_single_file(
+    file_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Retry processing a single file"""
+    try:
+        from app.models.file import File
+        from app.models.workspace import Workspace
+
+        # Find the file
+        stmt = select(File).where(File.file_id == file_id)
+        result = await db.execute(stmt)
+        file = result.scalar_one_or_none()
+
+        if not file:
+            raise HTTPException(status_code=404, detail=f"File {file_id} not found")
+
+        # Get team_id from workspace
+        workspace_stmt = select(Workspace).limit(1)
+        workspace_result = await db.execute(workspace_stmt)
+        workspace = workspace_result.scalar_one_or_none()
+        team_id = workspace.team_id if workspace else "T0420EE1VQ8"
+
+        # Clear error status
+        file.processing_error = None
+        file.is_processed = 0
+        file.is_downloaded = 0
+
+        # Queue for processing
+        await queue_manager.publish(
+            queue=queue_manager.PROCESSING_QUEUE,
+            message={
+                "type": "file_processing",
+                "file_id": file.file_id,
+                "file_info": {"id": file.file_id},
+                "channel_id": file.channel_id,
+                "user_id": file.user_id,
+                "team_id": team_id,
+                "message_id": file.message_id
+            }
+        )
+
+        await db.commit()
+
+        logger.info("file_retry_queued", file_id=file_id, filename=file.filename)
+
+        return {
+            "status": "success",
+            "message": f"File {file_id} queued for reprocessing",
+            "file_id": file_id,
+            "filename": file.filename
+        }
+
+    except Exception as e:
+        logger.error("retry_single_file_error", file_id=file_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))

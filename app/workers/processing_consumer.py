@@ -16,31 +16,27 @@ class ProcessingConsumer(BaseConsumer):
     def __init__(self):
         super().__init__(QueueManager.PROCESSING_QUEUE)
 
-    def process_message(self, message: Dict[str, Any]) -> bool:
+    async def process_message(self, message: Dict[str, Any]) -> bool:
         """Route processing tasks to appropriate handlers"""
         task_type = message.get("type")
 
         logger.info("processing_task", task_type=task_type)
 
         try:
-            # Use nest_asyncio to allow nested event loops
-            import nest_asyncio
-            nest_asyncio.apply()
-
-            loop = asyncio.get_event_loop()
-
             if task_type == "file_processing":
-                return loop.run_until_complete(self._process_file(message))
+                return await self._process_file(message)
             elif task_type == "channel_sync":
-                return loop.run_until_complete(self._sync_channel(message))
+                return await self._sync_channel(message)
             elif task_type == "channel_backfill":
-                return loop.run_until_complete(self._backfill_channel(message))
+                return await self._backfill_channel(message)
             elif task_type == "channel_archive":
-                return loop.run_until_complete(self._archive_channel(message))
+                return await self._archive_channel(message)
             elif task_type == "member_sync":
-                return loop.run_until_complete(self._sync_member(message))
+                return await self._sync_member(message)
             elif task_type == "user_sync":
-                return loop.run_until_complete(self._sync_user(message))
+                return await self._sync_user(message)
+            elif task_type == "initial_workspace_indexing":
+                return await self._index_workspace(message)
             else:
                 logger.warning("unknown_task_type", task_type=task_type)
                 return True  # Don't retry unknown tasks
@@ -187,6 +183,26 @@ class ProcessingConsumer(BaseConsumer):
             except Exception as e:
                 logger.error("channel_archive_failed", channel_id=message.get("channel_id"), error=str(e))
                 return False
+
+    async def _index_workspace(self, message: Dict[str, Any]) -> bool:
+        """Initial indexing of workspace"""
+        try:
+            from app.workers.initial_indexing import initial_indexing_worker
+
+            team_id = message.get("team_id")
+            bot_token = message.get("bot_token")
+
+            logger.info("initial_indexing_job_started", team_id=team_id)
+
+            await initial_indexing_worker.index_workspace(
+                team_id=team_id,
+                bot_token=bot_token
+            )
+
+            return True
+        except Exception as e:
+            logger.error("initial_indexing_job_failed", error=str(e), team_id=message.get("team_id"))
+            return False
 
 
 # Global processing consumer instance

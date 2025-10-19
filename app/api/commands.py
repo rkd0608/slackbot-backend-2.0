@@ -1,18 +1,13 @@
 """Slack slash commands API endpoints"""
-from fastapi import APIRouter, Request, Form, Depends, HTTPException, Header, BackgroundTasks
-from fastapi.responses import Response
 from typing import Optional
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.database import get_db
+
+from fastapi import APIRouter, Form, Depends, Header
+from fastapi.responses import Response
+
+from app.core.logging import get_logger
+from app.core.slack_verification import verify_slack_signature
 from app.services.bot_interaction import bot_interaction_service
 from app.services.response_formatter import response_formatter
-from app.core.logging import get_logger
-from app.core.config import settings
-from app.core.slack_verification import verify_slack_signature
-import hmac
-import hashlib
-import time
-import json
 
 logger = get_logger(__name__)
 router = APIRouter()
