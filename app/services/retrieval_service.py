@@ -27,13 +27,22 @@ class RetrievalService:
         query: str,
         query_analysis: Dict[str, Any],
         user_id: str,
+        team_id: str,  # ✅ REQUIRED - enforces permission filtering
         db: AsyncSession,
-        team_id: Optional[str] = None,
         top_k: int = 50
     ) -> List[Dict[str, Any]]:
-        """Main retrieval pipeline with multiple strategies"""
+        """Main retrieval pipeline with multiple strategies
+
+        SECURITY: team_id is REQUIRED to enforce permission filtering.
+        All results are filtered to only include channels the user has access to.
+        """
 
         logger.info("retrieval_started", query=query[:100], team_id=team_id)
+
+        # Validate team_id is provided
+        if not team_id:
+            logger.error("team_id_required_but_missing", user_id=user_id)
+            raise ValueError("team_id is required for permission filtering")
 
         # Stage 1: Parallel candidate generation
         start_time = time.time()
@@ -101,18 +110,25 @@ class RetrievalService:
         # Stage 4: Hydrate results with human-readable names
         hydrated_results = await self._hydrate_results(final_results, db)
 
-        # Stage 5: Filter by user permissions (if team_id provided)
-        if team_id:
-            from app.services.permission_service import permission_service
-            filtered_results = await permission_service.filter_results_by_permissions(
-                team_id=team_id,
-                user_id=user_id,
-                results=hydrated_results,
-                db=db
-            )
-            return filtered_results
+        # Stage 5: ALWAYS filter by user permissions (SECURITY CRITICAL)
+        from app.services.permission_service import permission_service
+        filtered_results = await permission_service.filter_results_by_permissions(
+            team_id=team_id,
+            user_id=user_id,
+            results=hydrated_results,
+            db=db
+        )
 
-        return hydrated_results
+        logger.info(
+            "permission_filtering_applied",
+            user_id=user_id,
+            team_id=team_id,
+            results_before=len(hydrated_results),
+            results_after=len(filtered_results),
+            filtered_count=len(hydrated_results) - len(filtered_results)
+        )
+
+        return filtered_results
 
     async def _parallel_retrieval(
         self,
@@ -120,9 +136,12 @@ class RetrievalService:
         query_analysis: Dict[str, Any],
         user_id: str,
         db: AsyncSession,
-        team_id: Optional[str] = None
+        team_id: str
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Run multiple retrieval strategies in parallel"""
+        """Run multiple retrieval strategies in parallel
+
+        SECURITY: team_id is REQUIRED for permission filtering
+        """
 
         import asyncio
 
@@ -159,9 +178,12 @@ class RetrievalService:
         query_analysis: Dict[str, Any],
         user_id: str,
         db: AsyncSession,
-        team_id: Optional[str] = None
+        team_id: str
     ) -> List[Dict[str, Any]]:
-        """Semantic vector search using Pinecone (messages + conditional file search)"""
+        """Semantic vector search using Pinecone (messages + conditional file search)
+
+        SECURITY: team_id is REQUIRED for permission filtering
+        """
 
         logger.info("DEBUG_semantic_search_called", query=query[:100])
 
@@ -297,17 +319,19 @@ class RetrievalService:
         query_analysis: Dict[str, Any],
         user_id: str,
         db: AsyncSession,
-        team_id: Optional[str] = None
+        team_id: str
     ) -> List[Dict[str, Any]]:
-        """Keyword-based search using database"""
+        """Keyword-based search using database
+
+        SECURITY: team_id is REQUIRED for permission filtering
+        """
 
         try:
-            # Build SQL query
-            query_filters = [Message.text.ilike(f"%{query}%")]
-
-            # Add team_id filter if provided
-            if team_id:
-                query_filters.append(Message.team_id == team_id)
+            # Build SQL query with REQUIRED team_id filter
+            query_filters = [
+                Message.text.ilike(f"%{query}%"),
+                Message.team_id == team_id  # ✅ ALWAYS filter by team_id
+            ]
 
             # Add channel filter - distinguish between IDs (uppercase) and names (lowercase)
             if query_analysis.get("channels"):
@@ -393,9 +417,12 @@ class RetrievalService:
         query_analysis: Dict[str, Any],
         user_id: str,
         db: AsyncSession,
-        team_id: Optional[str] = None
+        team_id: str
     ) -> List[Dict[str, Any]]:
-        """Entity-based retrieval using extracted entities and knowledge graph"""
+        """Entity-based retrieval using extracted entities and knowledge graph
+
+        SECURITY: team_id is REQUIRED for permission filtering
+        """
 
         try:
             entities = query_analysis.get("entities", [])
@@ -418,13 +445,11 @@ class RetrievalService:
             )
 
             # Find messages containing these entities (original + related)
-            query_filters = []
+            # ALWAYS include team_id filter
+            query_filters = [Message.team_id == team_id]  # ✅ REQUIRED team_id filter
+
             for entity_text in all_entity_texts:
                 query_filters.append(Message.text.ilike(f"%{entity_text}%"))
-
-            # Add team_id filter if provided
-            if team_id:
-                query_filters.append(Message.team_id == team_id)
 
             if not query_filters:
                 return []
@@ -939,17 +964,47 @@ class RetrievalService:
         query_analysis: Dict[str, Any],
         user_id: str,
         db: AsyncSession,
-        team_id: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
-        """Build Pinecone metadata filter from query analysis"""
+        team_id: str
+    ) -> Dict[str, Any]:
+        """Build Pinecone metadata filter from query analysis
 
-        filters = {}
+        SECURITY: team_id is REQUIRED for permission filtering
+        Returns a filter dict (never None - always includes team_id and user's accessible channels)
 
-        # Add team_id filter first (multi-tenancy)
-        if team_id:
-            filters["team_id"] = team_id
+        This implements TWO levels of permission filtering:
+        1. PRE-FILTERING: At Pinecone query level (faster, reduces unnecessary retrieval)
+        2. POST-FILTERING: After hydration in retrieve() method (backup safety net)
+        """
 
-        # Channel filter - distinguish between IDs (uppercase) and names (lowercase)
+        # STEP 1: Get user's accessible channels from permission service (PRE-FILTERING)
+        from app.services.permission_service import permission_service
+
+        permission_filter = await permission_service.build_channel_filter(
+            team_id=team_id,
+            user_id=user_id,
+            db=db
+        )
+
+        # Start with permission-based filter (team_id + accessible channels)
+        if permission_filter:
+            filters = permission_filter.copy()  # {"team_id": ..., "channel_id": {"$in": [...]}}
+            logger.info(
+                "permission_prefilter_applied",
+                team_id=team_id,
+                user_id=user_id,
+                accessible_channels_count=len(permission_filter.get("channel_id", {}).get("$in", []))
+            )
+        else:
+            # Fallback: if no accessible channels found, just use team_id
+            # (post-filtering will catch this and return empty results)
+            filters = {"team_id": team_id}
+            logger.warning(
+                "no_accessible_channels_for_prefilter",
+                team_id=team_id,
+                user_id=user_id
+            )
+
+        # STEP 2: If query specifies specific channels, intersect with accessible channels
         channels = query_analysis.get("channels")
         if channels:
             # Separate channel IDs (uppercase, starts with 'C') from channel names (lowercase)
@@ -957,24 +1012,48 @@ class RetrievalService:
             channel_names = [ch for ch in channels if ch and ch not in channel_ids_direct]
 
             # Get channel IDs from names (if any)
-            all_channel_ids = list(channel_ids_direct)  # Start with direct IDs
+            requested_channel_ids = list(channel_ids_direct)  # Start with direct IDs
             if channel_names:
                 result = await db.execute(
                     select(Channel.channel_id)
                     .where(Channel.channel_name.in_(channel_names))
                 )
                 name_to_ids = [row[0] for row in result.all()]
-                all_channel_ids.extend(name_to_ids)
+                requested_channel_ids.extend(name_to_ids)
 
-            if all_channel_ids:
-                filters["channel_id"] = {"$in": all_channel_ids}
+            # SECURITY: Intersect requested channels with user's accessible channels
+            if requested_channel_ids and "channel_id" in filters and "$in" in filters["channel_id"]:
+                accessible = set(filters["channel_id"]["$in"])
+                requested = set(requested_channel_ids)
+                allowed_channels = list(accessible & requested)  # Intersection
+
+                if allowed_channels:
+                    filters["channel_id"] = {"$in": allowed_channels}
+                    logger.info(
+                        "channel_filter_intersected",
+                        requested=len(requested_channel_ids),
+                        accessible=len(accessible),
+                        allowed=len(allowed_channels)
+                    )
+                else:
+                    # User requested channels they don't have access to - return no results
+                    # Set filter to impossible condition
+                    filters["channel_id"] = {"$in": ["IMPOSSIBLE_CHANNEL_ID"]}
+                    logger.warning(
+                        "user_requested_inaccessible_channels",
+                        user_id=user_id,
+                        requested_channels=requested_channel_ids
+                    )
+            elif requested_channel_ids:
+                # No accessible channels restriction (shouldn't happen), use requested
+                filters["channel_id"] = {"$in": requested_channel_ids}
 
             logger.info(
                 "channel_filter_debug",
                 channels_input=channels,
                 channel_ids_direct=channel_ids_direct,
                 channel_names=channel_names,
-                all_channel_ids=all_channel_ids
+                requested_channel_ids=requested_channel_ids
             )
 
         # Temporal filter
@@ -992,7 +1071,7 @@ class RetrievalService:
         if query_analysis.get("has_code_intent"):
             filters["has_code"] = True
 
-        return filters if filters else None
+        return filters  # Always returns a dict with at least team_id
 
     def _rewrite_query(self, query: str, query_analysis: Dict[str, Any]) -> str:
         """Rewrite conversational query to improve semantic matching"""

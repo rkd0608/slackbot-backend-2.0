@@ -1,11 +1,13 @@
 """Slack slash commands API endpoints"""
 from typing import Optional
 
-from fastapi import APIRouter, Form, Depends, Header
+from fastapi import APIRouter, Form, Depends, Header, HTTPException
 from fastapi.responses import Response
+from pydantic import ValidationError
 
 from app.core.logging import get_logger
 from app.core.slack_verification import verify_slack_signature
+from app.core.validation import QueryValidator, TeamIdValidator, UserIdValidator, ChannelIdValidator
 from app.services.bot_interaction import bot_interaction_service
 from app.services.response_formatter import response_formatter
 
@@ -84,12 +86,22 @@ async def ask_command(
 
     query = text.strip()
 
+    # Validate inputs
+    try:
+        QueryValidator(query=query)
+        TeamIdValidator(team_id=team_id)
+        UserIdValidator(user_id=user_id)
+        ChannelIdValidator(channel_id=channel_id)
+    except ValidationError as e:
+        logger.warning("validation_error", error=str(e), team_id=team_id[:5])
+        return Response(status_code=400, content="Invalid input")
+
     logger.info(
         "ask_command_received",
         team_id=team_id,
         user_id=user_id,
         channel_id=channel_id,
-        query=query
+        query=query[:100]
     )
 
     # Create truly independent background task (not tied to request)
@@ -148,6 +160,15 @@ async def find_command(
 
     query = text.strip()
 
+    # Validate IDs before processing
+    try:
+        TeamIdValidator(team_id=team_id)
+        UserIdValidator(user_id=user_id)
+        ChannelIdValidator(channel_id=channel_id)
+    except ValidationError as e:
+        logger.warning("validation_error", error=str(e), team_id=team_id[:5])
+        return Response(status_code=400, content="Invalid input")
+
     if not query:
         # Return help message if no query provided
         help_response = response_formatter.format_help_message("find")
@@ -157,11 +178,18 @@ async def find_command(
             "text": help_response["text"]
         }
 
+    # Validate query
+    try:
+        QueryValidator(query=query)
+    except ValidationError as e:
+        logger.warning("validation_error", error=str(e), team_id=team_id[:5])
+        return Response(status_code=400, content="Invalid query")
+
     logger.info(
         "find_command_received",
         user_id=user_id,
         channel_id=channel_id,
-        query=query
+        query=query[:100]
     )
 
     # Create truly independent background task (not tied to request)

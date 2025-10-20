@@ -73,14 +73,28 @@ class BotInteractionService:
                     conversation_id, db
                 )
 
-            # Step 3: Analyze rewritten query
+            # Step 3: Get user's team_id for permission filtering
+            from app.models.user import User
+            from sqlalchemy import select as sql_select
+
+            user_stmt = sql_select(User).where(User.user_id == user_id)
+            user_result = await db.execute(user_stmt)
+            user = user_result.scalar_one_or_none()
+            team_id = user.team_id if user else None
+
+            if not team_id:
+                logger.error("user_team_id_not_found", user_id=user_id)
+                raise ValueError(f"Could not find team_id for user {user_id}")
+
+            # Step 4: Analyze rewritten query
             analysis = await query_service.analyze_query(rewritten_query)
 
-            # Step 4: Retrieve relevant context using rewritten query
+            # Step 5: Retrieve relevant context using rewritten query WITH PERMISSION FILTERING
             retrieval_results = await retrieval_service.retrieve(
                 query=rewritten_query,
                 query_analysis=analysis,
                 user_id=user_id,
+                team_id=team_id,  # ✅ CRITICAL: Pass team_id for permission filtering
                 db=db,
                 top_k=10
             )
@@ -184,16 +198,7 @@ class BotInteractionService:
                 thread_ts=thread_ts
             )
 
-            # Step 11: Get user's team_id for query logging
-            from app.models.user import User
-            from sqlalchemy import select as sql_select
-
-            user_stmt = sql_select(User).where(User.user_id == user_id)
-            user_result = await db.execute(user_stmt)
-            user = user_result.scalar_one_or_none()
-            team_id = user.team_id if user else None
-
-            # Step 12: Log query with enhanced metadata
+            # Step 11: Log query with enhanced metadata (team_id already fetched in Step 3)
             await self._log_query(
                 query_id=query_id,
                 user_id=user_id,
@@ -249,14 +254,28 @@ class BotInteractionService:
                 reaction="eyes"
             )
 
-            # Step 1: Analyze query
+            # Step 1: Get user's team_id for permission filtering
+            from app.models.user import User
+            from sqlalchemy import select as sql_select
+
+            user_stmt = sql_select(User).where(User.user_id == user_id)
+            user_result = await db.execute(user_stmt)
+            user = user_result.scalar_one_or_none()
+            team_id = user.team_id if user else None
+
+            if not team_id:
+                logger.error("user_team_id_not_found", user_id=user_id)
+                raise ValueError(f"Could not find team_id for user {user_id}")
+
+            # Step 2: Analyze query
             analysis = await query_service.analyze_query(query)
 
-            # Step 2: Retrieve relevant results
+            # Step 3: Retrieve relevant results WITH PERMISSION FILTERING
             results = await retrieval_service.retrieve(
                 query=query,
                 query_analysis=analysis,
                 user_id=user_id,
+                team_id=team_id,  # ✅ CRITICAL: Pass team_id for permission filtering
                 db=db,
                 top_k=20
             )

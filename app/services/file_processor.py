@@ -9,6 +9,7 @@ from app.core.storage import storage_manager
 from app.services.slack_client import slack_client_manager
 from app.core.logging import get_logger
 from app.core.queue import queue_manager
+from app.core.config import settings
 
 logger = get_logger(__name__)
 
@@ -126,6 +127,21 @@ class FileProcessor:
                 slack_created_at=datetime.fromtimestamp(file_info.get("created", 0)),
                 expires_at=datetime.utcnow() + timedelta(days=30)
             )
+
+        # Check file size limit (security measure)
+        max_size_bytes = settings.max_file_size_mb * 1024 * 1024
+        if file_record.size > max_size_bytes:
+            logger.warning(
+                "file_too_large",
+                file_id=file_id,
+                filename=file_record.filename,
+                size_mb=file_record.size / (1024 * 1024),
+                max_mb=settings.max_file_size_mb
+            )
+            file_record.processing_error = f"File exceeds maximum size of {settings.max_file_size_mb}MB"
+            file_record.is_processed = 1
+            await db.commit()
+            return file_record
 
         # Log file info for debugging
         logger.info(

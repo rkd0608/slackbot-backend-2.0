@@ -1,4 +1,5 @@
 """Application configuration using Pydantic Settings"""
+import os
 from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -22,6 +23,10 @@ class Settings(BaseSettings):
     workers: int = Field(default=4)
     app_base_url: str = Field(default="http://localhost:8000")
     frontend_url: str = Field(default="http://localhost:3001")  # Next.js frontend URL
+
+    # Secrets Management
+    use_secrets_manager: bool = Field(default=False)  # Enable AWS Secrets Manager in production
+    aws_secret_name: str = Field(default="slackbot/production")  # Name of secret in AWS Secrets Manager
 
     # Slack Configuration
     slack_bot_token: str = Field(..., min_length=1)
@@ -126,6 +131,9 @@ class Settings(BaseSettings):
     # Rate Limiting
     query_rate_limit_per_hour: int = Field(default=100)
     query_burst_limit_per_minute: int = Field(default=10)
+
+    # File Upload Security
+    max_file_size_mb: int = Field(default=50)  # Maximum file size in MB
 
     # Code Intelligence Settings
     enable_code_intelligence: bool = Field(default=True)

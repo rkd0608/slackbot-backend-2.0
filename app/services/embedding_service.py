@@ -97,6 +97,7 @@ class EmbeddingService:
                 "message_id": message.message_id,
                 "channel_id": message.channel_id,
                 "channel_name": message.channel_name or "",
+                "team_id": message.team_id,  # CRITICAL: Required for permission filtering
                 "user_id": message.user_id,
                 "user_name": message.user_name or "",
                 "timestamp": message.timestamp.timestamp(),  # Unix timestamp for numeric filtering

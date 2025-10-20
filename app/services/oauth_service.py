@@ -58,7 +58,7 @@ class OAuthService:
             f"state={state_token}"
         )
 
-        logger.info("oauth_url_generated", state_token=state_token[:10])
+        logger.info("oauth_url_generated")
 
         return {
             "oauth_url": oauth_url,
@@ -71,7 +71,7 @@ class OAuthService:
         cached_state = await cache_manager.get(f"oauth:state:{state}")
 
         if not cached_state:
-            logger.warning("oauth_state_invalid", state=state[:10])
+            logger.warning("oauth_state_invalid")
             return False
 
         # Delete token after verification (one-time use)
