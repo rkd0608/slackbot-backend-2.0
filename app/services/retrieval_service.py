@@ -1,9 +1,8 @@
 """Multi-stage retrieval service"""
 from typing import List, Dict, Any, Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, func
+from sqlalchemy import select, and_, or_
 from app.models.message import Message
-from app.models.thread import Thread
 from app.models.channel import Channel
 from app.services.embedding_service import embedding_service
 from app.core.vector_db import vector_db_manager
@@ -201,7 +200,8 @@ class RetrievalService:
             kg_expanded_queries = await self._expand_query_with_knowledge_graph(
                 search_query,
                 query_analysis,
-                db
+                db,
+                team_id
             )
 
             # Combine all query variations (original expansions + knowledge graph expansions)
@@ -230,6 +230,7 @@ class RetrievalService:
             message_results = await self._search_message_vectors(
                 query_variations,
                 metadata_filter,
+                team_id,
                 top_k_per_variation=50
             )
 
@@ -247,6 +248,7 @@ class RetrievalService:
                 file_results = await self._search_file_vectors(
                     query_variations,
                     metadata_filter,
+                    team_id,
                     top_k_per_variation=20,
                     min_score=0.25
                 )
@@ -258,6 +260,7 @@ class RetrievalService:
                 file_results = await self._search_file_vectors(
                     query_variations,
                     metadata_filter,
+                    team_id,
                     top_k_per_variation=10,
                     min_score=0.5
                 )
@@ -289,12 +292,75 @@ class RetrievalService:
                         query=query,
                         code_intent=code_intent,
                         db=db,
+                        team_id=team_id,
                         top_k=15  # Get top 15 code snippets
                     )
                     logger.info("code_search_completed", code_count=len(code_results))
 
-            # Combine and deduplicate results (messages + files + code)
-            all_results = message_results + file_results + code_results
+            # STEP 4: GitHub Code Search - Search GitHub repository code if GitHub integration is enabled
+            github_code_results = []
+
+            if settings.enable_code_intelligence:  # Reuse code intelligence flag
+                from app.services.github_services.github_retrieval_service import get_github_retrieval_service
+                from sqlalchemy.orm import Session
+
+                # Check if user has a GitHub connection
+                try:
+                    # Use async DB session for GitHub retrieval service
+                    github_retrieval = get_github_retrieval_service(db)
+
+                    # Search GitHub code with permission filtering
+                    github_code_results = await github_retrieval.search_github_code(
+                        query=query,
+                        user_id=user_id,
+                        team_id=team_id,
+                        top_k=10,  # Get top 10 GitHub code results
+                        search_type="hybrid"  # Use hybrid search (code + semantic)
+                    )
+
+                    # Convert GitHub results to retrieval service format
+                    formatted_github_results = []
+                    for gh_result in github_code_results:
+                        formatted_github_results.append({
+                            "github_content_id": gh_result["content_id"],
+                            "score": gh_result["score"],
+                            "source": "semantic",
+                            "result_type": "github_code",
+                            "metadata": {
+                                "title": gh_result["title"],
+                                "file_path": gh_result["file_path"],
+                                "repository": gh_result["repository"],
+                                "repository_visibility": gh_result["repository_visibility"],
+                                "language": gh_result["language"],
+                                "author": gh_result["author"],
+                                "source_url": gh_result["source_url"],
+                                "content": gh_result["content"][:2000],  # Limit content length
+                                "created_at": gh_result["created_at"],
+                                "updated_at": gh_result["updated_at"],
+                                "indexed_at": gh_result["indexed_at"],
+                                "embedding_type": gh_result["embedding_type"]
+                            }
+                        })
+
+                    github_code_results = formatted_github_results
+
+                    logger.info(
+                        "github_code_search_completed",
+                        query=query[:50],
+                        results_count=len(github_code_results)
+                    )
+
+                except Exception as e:
+                    # GitHub search is optional - don't fail the entire retrieval if it errors
+                    logger.warning(
+                        "github_code_search_failed",
+                        error=str(e),
+                        query=query[:50]
+                    )
+                    github_code_results = []
+
+            # Combine and deduplicate results (messages + files + code + github code)
+            all_results = message_results + file_results + code_results + github_code_results
             all_results.sort(key=lambda x: x.get("score", 0.0), reverse=True)
             results = all_results[:100]  # Top 100
 
@@ -304,6 +370,7 @@ class RetrievalService:
                 message_results=len(message_results),
                 file_results=len(file_results),
                 code_results=len(code_results),
+                github_code_results=len(github_code_results),
                 total_results=len(results),
                 file_intent=file_intent
             )
@@ -539,6 +606,7 @@ class RetrievalService:
         self,
         query_variations: List[str],
         metadata_filter: Dict[str, Any],
+        team_id: str,
         top_k_per_variation: int = 50
     ) -> List[Dict[str, Any]]:
         """Search message vectors in Pinecone"""
@@ -562,8 +630,13 @@ class RetrievalService:
             if not query_embedding:
                 continue
 
-            # Query Pinecone for messages
-            matches = vector_db_manager.query(
+            # Query Pinecone for messages from team-specific namespace
+            namespace = vector_db_manager.get_team_namespace(
+                team_id,
+                vector_db_manager.NAMESPACE_MESSAGES
+            )
+            matches = vector_db_manager.query_namespace(
+                namespace=namespace,
                 vector=query_embedding,
                 top_k=top_k_per_variation,
                 filter_dict=message_filter,
@@ -596,6 +669,7 @@ class RetrievalService:
         self,
         query_variations: List[str],
         metadata_filter: Dict[str, Any],
+        team_id: str,
         top_k_per_variation: int = 20,
         min_score: float = 0.7
     ) -> List[Dict[str, Any]]:
@@ -629,8 +703,13 @@ class RetrievalService:
             if not query_embedding:
                 continue
 
-            # Query Pinecone for files
-            matches = vector_db_manager.query(
+            # Query Pinecone for files from team-specific namespace
+            namespace = vector_db_manager.get_team_namespace(
+                team_id,
+                vector_db_manager.NAMESPACE_FILES
+            )
+            matches = vector_db_manager.query_namespace(
+                namespace=namespace,
                 vector=query_embedding,
                 top_k=top_k_per_variation,
                 filter_dict=file_filter,
@@ -685,6 +764,7 @@ class RetrievalService:
         query: str,
         query_analysis: Dict[str, Any],
         db: AsyncSession,
+        team_id: str,
         max_variations: int = 3
     ) -> List[str]:
         """Generate query variations using knowledge graph entity relationships
@@ -736,7 +816,7 @@ class RetrievalService:
             entity_texts = [e.canonical_form for e in found_entities]
 
             # Tier 3: Expand using knowledge graph relationships
-            expanded_entities = await self._expand_entities_with_graph(entity_texts, db, max_related=5)
+            expanded_entities = await self._expand_entities_with_graph(entity_texts, db, team_id, max_related=5)
 
             if not expanded_entities:
                 logger.debug("kg_no_expansion", entities=entity_texts)
@@ -778,6 +858,7 @@ class RetrievalService:
         self,
         entity_texts: List[str],
         db: AsyncSession,
+        team_id: str,
         max_related: int = 5
     ) -> List[str]:
         """Expand entity search using knowledge graph relationships"""
@@ -790,7 +871,7 @@ class RetrievalService:
 
             for entity_text in entity_texts:
                 # Get entity from database
-                entity = await entity_service.get_entity_by_text(entity_text, db)
+                entity = await entity_service.get_entity_by_text(entity_text, team_id, db)
 
                 if not entity:
                     continue
@@ -798,6 +879,7 @@ class RetrievalService:
                 # Get related entities
                 related = await entity_service.get_related_entities(
                     entity.id,
+                    team_id,
                     db,
                     limit=max_related
                 )
@@ -823,16 +905,17 @@ class RetrievalService:
     ) -> List[Dict[str, Any]]:
         """Combine multiple ranking lists using Reciprocal Rank Fusion
 
-        Handles message results (message_id), file results (file_id), and code results (snippet_id)
+        Handles message results (message_id), file results (file_id), code results (snippet_id),
+        and GitHub code results (github_content_id)
         """
 
-        # Aggregate scores by result_id (could be message_id, file_id, or snippet_id)
+        # Aggregate scores by result_id (could be message_id, file_id, snippet_id, or github_content_id)
         scores = {}
 
         # Process semantic results
         for idx, result in enumerate(semantic_results):
-            # Use snippet_id for code, file_id for files, message_id for messages
-            result_id = result.get("snippet_id") or result.get("file_id") or result.get("message_id")
+            # Use github_content_id for GitHub code, snippet_id for Slack code, file_id for files, message_id for messages
+            result_id = result.get("github_content_id") or result.get("snippet_id") or result.get("file_id") or result.get("message_id")
             result_type = result.get("result_type", "message")
             rrf_score = 1 / (k + idx + 1)
 
@@ -850,7 +933,7 @@ class RetrievalService:
 
         # Process keyword results
         for idx, result in enumerate(keyword_results):
-            result_id = result.get("snippet_id") or result.get("file_id") or result.get("message_id")
+            result_id = result.get("github_content_id") or result.get("snippet_id") or result.get("file_id") or result.get("message_id")
             result_type = result.get("result_type", "message")
             rrf_score = 1 / (k + idx + 1)
 
@@ -868,7 +951,7 @@ class RetrievalService:
 
         # Process entity results
         for idx, result in enumerate(entity_results):
-            result_id = result.get("snippet_id") or result.get("file_id") or result.get("message_id")
+            result_id = result.get("github_content_id") or result.get("snippet_id") or result.get("file_id") or result.get("message_id")
             result_type = result.get("result_type", "message")
             rrf_score = 1 / (k + idx + 1)
 
@@ -1114,7 +1197,7 @@ class RetrievalService:
         results: List[Dict[str, Any]],
         db: AsyncSession
     ) -> List[Dict[str, Any]]:
-        """Hydrate results with message and file data"""
+        """Hydrate results with message, file, and GitHub code data"""
         from sqlalchemy import select
         from app.models.message import Message
         from app.models.file import File
@@ -1166,6 +1249,12 @@ class RetrievalService:
                     result["filename"] = metadata.get("filename", "unknown")
                     result["filetype"] = metadata.get("filetype", "")
                     result["extracted_text"] = metadata.get("text", "")
+
+            elif result_type == "github_code":
+                # GitHub code results are already fully hydrated with metadata
+                # Just pass them through - they already have all needed fields
+                # (title, file_path, repository, language, content, source_url, etc.)
+                pass
 
             else:
                 # Hydrate message result (existing logic)

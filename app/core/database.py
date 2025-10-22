@@ -31,7 +31,7 @@ class DatabaseManager:
             pool_size=10,
             max_overflow=20,
             pool_pre_ping=True,
-            echo=settings.environment == "development"
+            echo=False  # Disable SQL query logging
         )
 
         # Async engine for application: swap the sync driver (pymysql) to async (aiomysql)
@@ -42,7 +42,7 @@ class DatabaseManager:
             pool_size=10,
             max_overflow=20,
             pool_pre_ping=True,
-            echo=settings.environment == "development"
+            echo=False  # Disable SQL query logging
         )
 
         self.SessionLocal = sessionmaker(
@@ -86,3 +86,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """Dependency for FastAPI routes"""
     async for session in db_manager.get_session():
         yield session
+
+
+def get_db_sync():
+    """Dependency for FastAPI routes that need synchronous database access"""
+    db = db_manager.SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

@@ -161,6 +161,30 @@ class Settings(BaseSettings):
     enable_structural_matching: bool = Field(default=True)
     code_search_min_score: float = Field(default=0.0)  # Minimum similarity score (0.0 = no filtering)
 
+    # GitHub Integration
+    github_client_id: Optional[str] = Field(default=None)
+    github_client_secret: Optional[str] = Field(default=None)
+    github_oauth_redirect_uri: Optional[str] = Field(default=None)
+    github_api_base_url: str = Field(default="https://api.github.com")
+    github_api_version: str = Field(default="2022-11-28")
+    pinecone_github_index_name: str = Field(default="github-code-embeddings")
+
+    # Token Encryption (for OAuth tokens)
+    oauth_token_encryption_key: str = Field(..., min_length=1)  # Base64-encoded 32-byte key
+
+    # Code Embedding Settings
+    enable_dual_embedding: bool = Field(default=True)
+    code_embedding_weight: float = Field(default=0.6)
+    semantic_embedding_weight: float = Field(default=0.4)
+
+    # Chunking Settings for Large Files
+    max_file_size_for_chunking: int = Field(default=10000)  # characters
+    max_lines_for_chunking: int = Field(default=500)  # lines
+
+    # Code Intelligence Cache
+    cache_code_structure: bool = Field(default=True)
+    code_structure_cache_ttl: int = Field(default=86400)  # 24 hours
+
 
 # Singleton instance
 settings = Settings()

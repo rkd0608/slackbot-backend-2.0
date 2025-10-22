@@ -213,9 +213,27 @@ class CodeEmbeddingService:
             if vector_db_manager.index is None:
                 vector_db_manager.initialize()
 
-            # Step 5: Upsert to Pinecone CODE namespace
+            # Step 5: Get team_id from message for namespace
+            from app.models.message import Message
+            message_result = await db.execute(
+                select(Message).where(Message.message_id == snippet.message_id)
+            )
+            message = message_result.scalar_one_or_none()
+
+            if not message or not message.team_id:
+                logger.error("message_or_team_id_not_found", snippet_id=snippet_id, message_id=snippet.message_id)
+                return False
+
+            # Add team_id to metadata for filtering
+            pinecone_metadata["team_id"] = message.team_id
+
+            # Step 6: Upsert to team-specific CODE namespace for multi-tenancy
+            namespace = vector_db_manager.get_team_namespace(
+                message.team_id,
+                vector_db_manager.NAMESPACE_CODE
+            )
             success = vector_db_manager.upsert_to_namespace(
-                namespace=settings.pinecone_code_namespace,
+                namespace=namespace,
                 vectors=[{
                     "id": snippet_id,
                     "values": embedding,
@@ -227,7 +245,7 @@ class CodeEmbeddingService:
                 logger.error("pinecone_upsert_failed", snippet_id=snippet_id)
                 return False
 
-            # Step 5: Update snippet with vector_id
+            # Step 7: Update snippet with vector_id
             await db.execute(
                 update(CodeSnippet)
                 .where(CodeSnippet.snippet_id == snippet_id)
@@ -240,7 +258,8 @@ class CodeEmbeddingService:
                 snippet_id=snippet_id,
                 language=snippet.language,
                 code_type=snippet.code_type,
-                namespace=settings.pinecone_code_namespace
+                namespace=namespace,
+                team_id=message.team_id
             )
 
             return True

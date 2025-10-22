@@ -13,9 +13,38 @@ class VectorDBManager:
     DIMENSION = 1536  # OpenAI text-embedding-3-large
     METRIC = "cosine"
 
+    # Namespace naming convention for multi-tenancy
+    NAMESPACE_MESSAGES = "messages"  # Slack messages
+    NAMESPACE_CODE = "code"          # Code snippets
+    NAMESPACE_FILES = "files"        # File embeddings
+
+    # Legacy namespaces (for backward compatibility during migration)
+    LEGACY_NAMESPACE_DEFAULT = ""   # Old default namespace
+    LEGACY_NAMESPACE_CODE = "code"  # Old code namespace
+
     def __init__(self):
         self.pc: Optional[Pinecone] = None
         self.index = None
+
+    @staticmethod
+    def get_team_namespace(team_id: str, content_type: str) -> str:
+        """
+        Generate team-specific namespace
+
+        Args:
+            team_id: Slack team/workspace ID
+            content_type: Type of content (messages, code, files)
+
+        Returns:
+            Namespace string in format: {team_id}:{content_type}
+
+        Examples:
+            >>> VectorDBManager.get_team_namespace("T0721T4PN4U", "messages")
+            "T0721T4PN4U:messages"
+            >>> VectorDBManager.get_team_namespace("T0721T4PN4U", "code")
+            "T0721T4PN4U:code"
+        """
+        return f"{team_id}:{content_type}"
 
     def initialize(self):
         """Initialize Pinecone connection and index"""

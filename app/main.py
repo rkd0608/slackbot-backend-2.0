@@ -21,7 +21,7 @@ from app.core.exceptions import (
     PermissionException
 )
 
-from app.api import health, events, admin, query, answer, commands, interactions, oauth, billing, stripe_webhooks, admin_dashboard, jobs, auth, onboarding, workspace
+from app.api import health, events, admin, query, answer, commands, interactions, oauth, billing, stripe_webhooks, admin_dashboard, jobs, auth, onboarding, workspace, github_oauth, github_sync
 
 # Setup logging
 setup_logging()
@@ -151,6 +151,8 @@ app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 app.include_router(query.router, prefix="/api/v1", tags=["query"])
 app.include_router(answer.router, prefix="/api/v1", tags=["answer"])
 app.include_router(oauth.router, tags=["oauth"])  # OAuth endpoints without /api/v1 prefix
+app.include_router(github_oauth.router, tags=["github-oauth"])  # GitHub OAuth endpoints
+app.include_router(github_sync.router, tags=["github-sync"])  # GitHub sync/indexing endpoints
 app.include_router(billing.router, prefix="/api/v1", tags=["billing"])
 app.include_router(stripe_webhooks.router, prefix="/api/v1", tags=["stripe"])
 app.include_router(admin_dashboard.router, prefix="/api/v1", tags=["admin-dashboard"])
