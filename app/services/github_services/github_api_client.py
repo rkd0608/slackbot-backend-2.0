@@ -449,6 +449,8 @@ class GitHubAPIClient:
     async def search_code(
         self,
         query: str,
+        repo: Optional[str] = None,
+        language: Optional[str] = None,
         per_page: int = 30
     ) -> Dict:
         """
@@ -456,17 +458,26 @@ class GitHubAPIClient:
 
         Args:
             query: Search query (supports GitHub code search syntax)
+            repo: Optional repository filter (owner/repo)
+            language: Optional language filter
             per_page: Results per page (max 100)
 
         Returns:
             Search results with file matches
         """
         try:
+            # Build search query with filters
+            search_query = query
+            if repo:
+                search_query += f" repo:{repo}"
+            if language:
+                search_query += f" language:{language}"
+
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(
                     f"{self.BASE_URL}/search/code",
                     headers=self.headers,
-                    params={"q": query, "per_page": per_page}
+                    params={"q": search_query, "per_page": per_page}
                 )
 
                 response.raise_for_status()
@@ -476,7 +487,7 @@ class GitHubAPIClient:
 
                 logger.info(
                     "github_code_search_completed",
-                    query=query,
+                    query=search_query,
                     total_count=search_results.get("total_count", 0)
                 )
 
@@ -491,6 +502,229 @@ class GitHubAPIClient:
             raise
         except Exception as e:
             logger.error("github_code_search_error", error=str(e))
+            raise
+
+    async def search_issues(
+        self,
+        query: str,
+        repo: Optional[str] = None,
+        state: Optional[str] = None,
+        per_page: int = 30
+    ) -> Dict:
+        """
+        Search for issues and pull requests
+
+        Args:
+            query: Search query
+            repo: Optional repository filter (owner/repo)
+            state: Optional state filter (open, closed)
+            per_page: Results per page (max 100)
+
+        Returns:
+            Search results with issues/PRs
+        """
+        try:
+            # Build search query with filters
+            search_query = query
+            if repo:
+                search_query += f" repo:{repo}"
+            if state:
+                search_query += f" state:{state}"
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    f"{self.BASE_URL}/search/issues",
+                    headers=self.headers,
+                    params={"q": search_query, "per_page": per_page}
+                )
+
+                response.raise_for_status()
+                search_results = response.json()
+
+                self._log_rate_limit(response.headers)
+
+                logger.info(
+                    "github_issue_search_completed",
+                    query=search_query,
+                    total_count=search_results.get("total_count", 0)
+                )
+
+                return search_results
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "github_issue_search_failed",
+                query=query,
+                status_code=e.response.status_code
+            )
+            raise
+        except Exception as e:
+            logger.error("github_issue_search_error", error=str(e))
+            raise
+
+    async def get_authenticated_user(self) -> Dict:
+        """
+        Get authenticated user information
+
+        Returns:
+            User data dict
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    f"{self.BASE_URL}/user",
+                    headers=self.headers
+                )
+
+                response.raise_for_status()
+                user_data = response.json()
+
+                self._log_rate_limit(response.headers)
+
+                logger.info(
+                    "github_user_fetched",
+                    username=user_data.get('login')
+                )
+
+                return user_data
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "github_user_fetch_failed",
+                status_code=e.response.status_code
+            )
+            raise
+        except Exception as e:
+            logger.error("github_user_fetch_error", error=str(e))
+            raise
+
+    async def get_repository(self, owner: str, repo: str) -> Dict:
+        """
+        Get repository metadata
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+
+        Returns:
+            Repository data dict
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    f"{self.BASE_URL}/repos/{owner}/{repo}",
+                    headers=self.headers
+                )
+
+                response.raise_for_status()
+                repo_data = response.json()
+
+                self._log_rate_limit(response.headers)
+
+                logger.info(
+                    "github_repo_fetched",
+                    repo=f"{owner}/{repo}"
+                )
+
+                return repo_data
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "github_repo_fetch_failed",
+                repo=f"{owner}/{repo}",
+                status_code=e.response.status_code
+            )
+            raise
+        except Exception as e:
+            logger.error("github_repo_fetch_error", error=str(e))
+            raise
+
+    async def get_issue(self, owner: str, repo: str, issue_number: int) -> Dict:
+        """
+        Get issue details
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            issue_number: Issue number
+
+        Returns:
+            Issue data dict
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_number}",
+                    headers=self.headers
+                )
+
+                response.raise_for_status()
+                issue_data = response.json()
+
+                self._log_rate_limit(response.headers)
+
+                logger.info(
+                    "github_issue_fetched",
+                    repo=f"{owner}/{repo}",
+                    issue=issue_number
+                )
+
+                return issue_data
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "github_issue_fetch_failed",
+                repo=f"{owner}/{repo}",
+                issue=issue_number,
+                status_code=e.response.status_code
+            )
+            raise
+        except Exception as e:
+            logger.error("github_issue_fetch_error", error=str(e))
+            raise
+
+    async def get_pull_request(self, owner: str, repo: str, pr_number: int) -> Dict:
+        """
+        Get pull request details
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_number: PR number
+
+        Returns:
+            PR data dict
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pr_number}",
+                    headers=self.headers
+                )
+
+                response.raise_for_status()
+                pr_data = response.json()
+
+                self._log_rate_limit(response.headers)
+
+                logger.info(
+                    "github_pr_fetched",
+                    repo=f"{owner}/{repo}",
+                    pr=pr_number
+                )
+
+                return pr_data
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "github_pr_fetch_failed",
+                repo=f"{owner}/{repo}",
+                pr=pr_number,
+                status_code=e.response.status_code
+            )
+            raise
+        except Exception as e:
+            logger.error("github_pr_fetch_error", error=str(e))
             raise
 
 

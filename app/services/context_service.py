@@ -23,15 +23,17 @@ class ContextService:
         db: AsyncSession,
         max_messages: int = 50
     ) -> Dict[str, Any]:
-        """Assemble complete context from retrieval results"""
+        """Assemble complete context from retrieval results (Slack + GitHub + other sources)"""
 
         logger.info("context_assembly_started", results=len(results))
 
-        # Separate file results from message results
+        # Separate by source type and result type
         file_results = [r for r in results if r.get("result_type") == "file"]
-        message_results = [r for r in results if r.get("result_type") == "message"]
+        message_results = [r for r in results if r.get("result_type") == "message" or r.get("source") == "slack"]
+        github_results = [r for r in results if r.get("source") == "github"]
+        other_source_results = [r for r in results if r.get("source") not in ["slack", "github"] and r.get("result_type") != "file"]
 
-        # Fetch full message details
+        # Fetch full message details (Slack only)
         messages = await self._fetch_messages(message_results, db)
 
         # Group by threads
@@ -52,16 +54,26 @@ class ContextService:
             max_messages
         )
 
-        # Generate meta-context
+        # Format GitHub results for context
+        github_contexts = self._format_github_results(github_results)
+
+        # Format other source results
+        other_source_contexts = self._format_other_source_results(other_source_results)
+
+        # Generate meta-context with cross-source awareness
         meta_context = self._generate_meta_context(
             selected_contexts,
-            query_analysis
+            query_analysis,
+            github_count=len(github_contexts),
+            other_source_count=len(other_source_contexts)
         )
 
         logger.info(
             "context_assembled",
-            threads=len(selected_contexts),
-            total_messages=sum(len(c["messages"]) for c in selected_contexts),
+            slack_threads=len(selected_contexts),
+            slack_messages=sum(len(c["messages"]) for c in selected_contexts),
+            github_items=len(github_contexts),
+            other_source_items=len(other_source_contexts),
             files=len(file_results)
         )
 
@@ -74,6 +86,14 @@ class ContextService:
         # Add file results if any
         if file_results:
             context_dict["file_results"] = file_results
+
+        # Add GitHub results if any
+        if github_contexts:
+            context_dict["github_results"] = github_contexts
+
+        # Add other source results if any
+        if other_source_contexts:
+            context_dict["other_source_results"] = other_source_contexts
 
         return context_dict
 
@@ -291,14 +311,55 @@ class ContextService:
 
         return selected
 
+    def _format_github_results(self, github_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Format GitHub results for LLM context"""
+        formatted = []
+
+        for result in github_results[:10]:  # Limit to top 10 GitHub items
+            formatted.append({
+                "canonical_id": result.get("canonical_id", ""),
+                "node_type": result.get("node_type", "code_file"),
+                "title": result.get("title", "Untitled"),
+                "content": result.get("text", result.get("content", ""))[:3000],  # Limit content length
+                "url": result.get("url", ""),
+                "author": result.get("author", "unknown"),
+                "timestamp": result.get("timestamp", ""),
+                "score": result.get("score", 0.0),
+                "project_context": result.get("project_context", {}),
+                "language": result.get("project_context", {}).get("language", "unknown")
+            })
+
+        return formatted
+
+    def _format_other_source_results(self, other_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Format results from other sources (Jira, Confluence, etc.) for LLM context"""
+        formatted = []
+
+        for result in other_results[:5]:  # Limit to top 5 items from other sources
+            formatted.append({
+                "source": result.get("source", "unknown"),
+                "canonical_id": result.get("canonical_id", ""),
+                "node_type": result.get("node_type", "unknown"),
+                "title": result.get("title", "Untitled"),
+                "content": result.get("text", result.get("content", ""))[:2000],  # Limit content
+                "url": result.get("url", ""),
+                "author": result.get("author", "unknown"),
+                "timestamp": result.get("timestamp", ""),
+                "score": result.get("score", 0.0)
+            })
+
+        return formatted
+
     def _generate_meta_context(
         self,
         contexts: List[Dict[str, Any]],
-        query_analysis: Dict[str, Any]
+        query_analysis: Dict[str, Any],
+        github_count: int = 0,
+        other_source_count: int = 0
     ) -> Dict[str, Any]:
-        """Generate meta-information about retrieved contexts"""
+        """Generate meta-information about retrieved contexts (cross-source aware)"""
 
-        # Get unique channels
+        # Get unique channels (Slack)
         channels = list(set(
             c["channel_name"]
             for c in contexts
@@ -329,6 +390,15 @@ class ContextService:
         # Cross-thread connections
         connections = self._find_cross_thread_connections(contexts)
 
+        # Cross-source summary
+        sources_used = []
+        if len(contexts) > 0:
+            sources_used.append("slack")
+        if github_count > 0:
+            sources_used.append("github")
+        if other_source_count > 0:
+            sources_used.append("other")
+
         return {
             "total_threads": len(contexts),
             "total_messages": sum(len(c["messages"]) for c in contexts),
@@ -336,7 +406,12 @@ class ContextService:
             "participants": unique_participants,
             "time_span": time_span,
             "connections": connections,
-            "query_intents": query_analysis.get("intents", [])
+            "query_intents": query_analysis.get("intents", []),
+            # Cross-source metadata
+            "sources_used": sources_used,
+            "github_items": github_count,
+            "other_source_items": other_source_count,
+            "is_cross_source": len(sources_used) > 1
         }
 
     def _find_cross_thread_connections(

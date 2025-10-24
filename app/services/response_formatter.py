@@ -184,6 +184,19 @@ class ResponseFormatter:
         return text
 
     @staticmethod
+    def _get_source_emoji(source: str) -> str:
+        """Get emoji indicator for a source type"""
+        source_emojis = {
+            'slack': '💬',
+            'github': '💻',
+            'jira': '🎫',
+            'confluence': '📄',
+            'linear': '📋',
+            'notion': '📝'
+        }
+        return source_emojis.get(source.lower(), '📌')
+
+    @staticmethod
     def format_answer_response(
         answer: str,
         citations: List[Dict[str, Any]],
@@ -258,33 +271,70 @@ class ResponseFormatter:
         if citations:
             blocks.append({"type": "divider"})
 
-            # Citations section
+            # Citations section with source indicators
             citation_lines = []
             for idx, citation in enumerate(citations[:5], 1):  # Limit to 5 citations
-                channel_name = citation.get("channel_name", "unknown")
-                channel_id = citation.get("channel_id", "")
-                user = citation.get("user_name", "unknown")
-                timestamp = citation.get("timestamp", "")
-                url = citation.get("url", "")
+                source = citation.get("source", "slack")
+                source_emoji = ResponseFormatter._get_source_emoji(source)
 
-                # Format channel reference - use ID if available, otherwise name
-                if channel_id:
-                    channel_ref = f"<#{channel_id}>"
+                # Handle different source types
+                if source == "slack":
+                    channel_name = citation.get("channel_name", "unknown")
+                    channel_id = citation.get("channel_id", "")
+                    user = citation.get("user_name", "unknown")
+                    timestamp = citation.get("timestamp", "")
+                    url = citation.get("url", "")
+
+                    # Format channel reference - use ID if available, otherwise name
+                    if channel_id:
+                        channel_ref = f"<#{channel_id}>"
+                    else:
+                        channel_ref = f"#{channel_name}"
+
+                    # Build citation line with source emoji
+                    citation_text = f"{source_emoji} *{idx}.* {channel_ref}"
+
+                    # Add user mention
+                    if user and user != "unknown":
+                        citation_text += f" - {user}"
+
+                    # Add link or timestamp
+                    if url:
+                        citation_text += f" - <{url}|View>"
+                    elif timestamp:
+                        citation_text += f" - _{timestamp}_"
+
+                elif source == "github":
+                    # GitHub citation format
+                    title = citation.get("title", "Untitled")
+                    url = citation.get("url", "")
+                    node_type = citation.get("node_type", "code_file")
+                    author = citation.get("author", "")
+
+                    citation_text = f"{source_emoji} *{idx}.* {title}"
+
+                    if node_type:
+                        citation_text += f" _{node_type.replace('_', ' ')}_"
+
+                    if author:
+                        citation_text += f" - {author}"
+
+                    if url:
+                        citation_text += f" - <{url}|View on GitHub>"
+
                 else:
-                    channel_ref = f"#{channel_name}"
+                    # Generic format for other sources
+                    title = citation.get("title", "Untitled")
+                    url = citation.get("url", "")
+                    author = citation.get("author", "")
 
-                # Build citation line with proper escaping
-                citation_text = f"*{idx}.* {channel_ref}"
+                    citation_text = f"{source_emoji} *{idx}.* {title}"
 
-                # Add user mention (escape any special characters in username)
-                if user and user != "unknown":
-                    citation_text += f" - {user}"
+                    if author:
+                        citation_text += f" - {author}"
 
-                # Add link or timestamp
-                if url:
-                    citation_text += f" - <{url}|View Message>"
-                elif timestamp:
-                    citation_text += f" - _{timestamp}_"
+                    if url:
+                        citation_text += f" - <{url}|View>"
 
                 citation_lines.append(citation_text)
 
@@ -292,7 +342,7 @@ class ResponseFormatter:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "Sources:\n" + "\n".join(citation_lines)
+                    "text": "*Sources:*\n" + "\n".join(citation_lines)
                 }
             })
 

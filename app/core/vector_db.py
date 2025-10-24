@@ -265,6 +265,38 @@ class VectorDBManager:
             )
             return False
 
+    def delete_namespace(
+        self,
+        namespace: str
+    ) -> bool:
+        """
+        Delete all vectors in a namespace
+
+        This deletes ALL vectors in the specified namespace.
+        Use with caution - this is irreversible!
+        """
+        try:
+            # Delete all vectors in namespace using delete_all parameter
+            self.index.delete(
+                delete_all=True,
+                namespace=namespace
+            )
+
+            logger.warning(
+                "namespace_deleted",
+                namespace=namespace,
+                message="All vectors in namespace deleted"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                "namespace_deletion_error",
+                namespace=namespace,
+                error=str(e)
+            )
+            return False
+
     def get_namespace_stats(self, namespace: str) -> Dict[str, Any]:
         """Get statistics for a specific namespace"""
         try:

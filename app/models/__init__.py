@@ -17,6 +17,8 @@ from app.models.integration import (
     ExternalContent,
     IntegrationSyncJob
 )
+from app.models.cross_source_node import CrossSourceNode, NodeType
+from app.models.cross_source_edge import CrossSourceEdge, EdgeType, DetectionMethod
 
 __all__ = [
     "Message",
@@ -38,5 +40,10 @@ __all__ = [
     "Integration",
     "UserIntegrationConnection",
     "ExternalContent",
-    "IntegrationSyncJob"
+    "IntegrationSyncJob",
+    "CrossSourceNode",
+    "NodeType",
+    "CrossSourceEdge",
+    "EdgeType",
+    "DetectionMethod"
 ]

@@ -1,9 +1,10 @@
 """Bot interaction orchestration service"""
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.slack_client import slack_client_manager
 from app.services.response_formatter import response_formatter
 from app.services.retrieval_service import retrieval_service
+from app.services.cross_source_retrieval_service import get_cross_source_retrieval_service
 from app.services.query_service import query_service
 from app.services.query_rewriter import query_rewriter
 from app.services.llm_service import llm_service
@@ -20,6 +21,96 @@ logger = get_logger(__name__)
 
 class BotInteractionService:
     """Orchestrates bot interactions and responses"""
+
+    def _merge_retrieval_results(
+        self,
+        slack_results: List[Dict[str, Any]],
+        cross_source_data: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Merge and deduplicate results from Slack-only and cross-source retrieval
+
+        Args:
+            slack_results: Results from traditional Slack retrieval
+            cross_source_data: Results from cross-source retrieval service
+
+        Returns:
+            Combined and deduplicated results with source indicators
+        """
+        try:
+            # Extract cross-source results
+            cross_source_results = cross_source_data.get('results', [])
+
+            # Convert cross-source results to a format compatible with existing pipeline
+            # Cross-source results have 'canonical_id', 'source', 'node_type', etc.
+            merged = []
+            seen_ids = set()
+
+            # Add cross-source results first (higher priority for GitHub code, etc.)
+            for result in cross_source_results:
+                # Check if this is a Slack message (to deduplicate with slack_results)
+                canonical_id = result.get('canonical_id', '')
+                source = result.get('source', '')
+
+                # For Slack messages, extract message_id for deduplication
+                if source == 'slack':
+                    # canonical_id format: "slack:1234567890.123456"
+                    message_id = canonical_id.replace('slack:', '')
+                    seen_ids.add(message_id)
+
+                # Convert to compatible format
+                merged_result = {
+                    'canonical_id': canonical_id,
+                    'source': source,
+                    'source_type': source,  # For display
+                    'score': result.get('score', 0.5),
+                    'text': result.get('content', ''),
+                    'title': result.get('title', ''),
+                    'url': result.get('url', ''),
+                    'author': result.get('author', 'unknown'),
+                    'timestamp': str(result.get('created_at', '')),
+                    'node_type': result.get('node_type', 'unknown'),
+                    'message_id': canonical_id.replace('slack:', '') if source == 'slack' else None,
+                    'channel_name': result.get('channel_context', {}).get('channel_name') if source == 'slack' else None,
+                    'channel_id': result.get('channel_context', {}).get('channel_id') if source == 'slack' else None,
+                    'user_name': result.get('author', 'unknown'),
+                }
+
+                merged.append(merged_result)
+
+            # Add Slack-only results that weren't in cross-source results
+            for result in slack_results:
+                message_id = result.get('message_id', '')
+
+                # Skip if we already have this from cross-source
+                if message_id and message_id in seen_ids:
+                    continue
+
+                # Add source indicator for Slack
+                result['source'] = 'slack'
+                result['source_type'] = 'slack'
+                merged.append(result)
+
+            # Sort by score (descending)
+            merged.sort(key=lambda x: x.get('score', 0), reverse=True)
+
+            logger.info(
+                "retrieval_results_merged",
+                slack_count=len(slack_results),
+                cross_source_count=len(cross_source_results),
+                merged_count=len(merged),
+                deduplication_saved=len(slack_results) + len(cross_source_results) - len(merged)
+            )
+
+            return merged
+
+        except Exception as e:
+            logger.error("merge_retrieval_results_failed", error=str(e))
+            # Fallback: return Slack results only
+            for result in slack_results:
+                result['source'] = 'slack'
+                result['source_type'] = 'slack'
+            return slack_results
 
     async def handle_ask_query(
         self,
@@ -89,15 +180,70 @@ class BotInteractionService:
             # Step 4: Analyze rewritten query
             analysis = await query_service.analyze_query(rewritten_query)
 
-            # Step 5: Retrieve relevant context using rewritten query WITH PERMISSION FILTERING
-            retrieval_results = await retrieval_service.retrieve(
-                query=rewritten_query,
-                query_analysis=analysis,
-                user_id=user_id,
-                team_id=team_id,  # ✅ CRITICAL: Pass team_id for permission filtering
-                db=db,
-                top_k=10
-            )
+            # Step 5: Hybrid retrieval - search both Slack and cross-source knowledge graph
+            # Run both retrieval methods in parallel for better performance
+            try:
+                # Traditional Slack-only retrieval (fast, proven)
+                slack_retrieval_task = retrieval_service.retrieve(
+                    query=rewritten_query,
+                    query_analysis=analysis,
+                    user_id=user_id,
+                    team_id=team_id,
+                    db=db,
+                    top_k=10
+                )
+
+                # Cross-source retrieval (includes GitHub, future: Jira, Confluence)
+                cross_source_service = get_cross_source_retrieval_service()
+                cross_source_task = cross_source_service.search_across_sources(
+                    query=rewritten_query,
+                    team_id=team_id,
+                    db=db,
+                    sources=["slack", "github"],  # Search both sources
+                    expand_graph=True,  # Enable graph-based context expansion
+                    max_depth=2,  # 2-hop traversal for related content
+                    top_k=10
+                )
+
+                # Await both tasks
+                import asyncio
+                slack_results, cross_source_data = await asyncio.gather(
+                    slack_retrieval_task,
+                    cross_source_task,
+                    return_exceptions=True
+                )
+
+                # Handle exceptions gracefully
+                if isinstance(slack_results, Exception):
+                    logger.error("slack_retrieval_failed", error=str(slack_results))
+                    slack_results = []
+
+                if isinstance(cross_source_data, Exception):
+                    logger.error("cross_source_retrieval_failed", error=str(cross_source_data))
+                    cross_source_data = {'results': [], 'stats': {}}
+
+                # Merge and deduplicate results
+                retrieval_results = self._merge_retrieval_results(slack_results, cross_source_data)
+
+                logger.info(
+                    "hybrid_retrieval_completed",
+                    slack_count=len(slack_results) if not isinstance(slack_results, Exception) else 0,
+                    cross_source_count=len(cross_source_data.get('results', [])),
+                    merged_count=len(retrieval_results),
+                    graph_expanded=cross_source_data.get('stats', {}).get('expanded_nodes', 0)
+                )
+
+            except Exception as e:
+                logger.error("hybrid_retrieval_error", error=str(e))
+                # Fallback to Slack-only retrieval
+                retrieval_results = await retrieval_service.retrieve(
+                    query=rewritten_query,
+                    query_analysis=analysis,
+                    user_id=user_id,
+                    team_id=team_id,
+                    db=db,
+                    top_k=10
+                )
 
             # Extract retrieval metadata
             retrieval_metadata = self._extract_retrieval_metadata(retrieval_results)

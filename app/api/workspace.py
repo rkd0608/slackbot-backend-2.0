@@ -1,5 +1,5 @@
 """Workspace management API endpoints"""
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Body
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
@@ -12,6 +12,7 @@ from app.models.user import User
 from app.models.workspace import Workspace
 from app.models.channel import Channel
 from app.core.logging import get_logger
+from app.services.workspace_deletion_service import workspace_deletion_service
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -66,6 +67,21 @@ class WorkspaceStatusResponse(BaseModel):
     indexing: dict
     usage: dict
     is_ready: bool
+
+
+class DeleteWorkspaceRequest(BaseModel):
+    """Request to delete workspace"""
+    confirmation_text: str  # Must match workspace name
+    delete_from_slack: bool = True  # Whether to uninstall from Slack
+
+
+class DeleteWorkspaceResponse(BaseModel):
+    """Response after workspace deletion"""
+    success: bool
+    message: str
+    team_id: str
+    workspace_name: str
+    deletion_stats: dict
 
 
 @router.get("/workspaces/{team_id}/channels", response_model=ChannelListResponse)
@@ -447,3 +463,118 @@ async def _fetch_slack_channels(
                 break
 
     return channels
+
+
+@router.delete("/workspaces/{team_id}", response_model=DeleteWorkspaceResponse)
+async def delete_workspace(
+    team_id: str,
+    request: DeleteWorkspaceRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Delete workspace and all associated data
+
+    **DANGER: This action is irreversible!**
+
+    This endpoint will:
+    - Delete all database records (messages, threads, channels, users, etc.)
+    - Delete all vector embeddings from Pinecone
+    - Optionally uninstall the app from Slack
+    - Remove all integration data (GitHub, Jira, etc.)
+
+    **Authorization**: Only workspace admins can delete the workspace
+
+    **Confirmation**: Must provide workspace name as confirmation
+    """
+
+    try:
+        # Step 1: Get workspace to check name and permissions
+        stmt = select(Workspace).where(Workspace.team_id == team_id)
+        result = await db.execute(stmt)
+        workspace = result.scalar_one_or_none()
+
+        if not workspace:
+            raise HTTPException(
+                status_code=404,
+                detail="Workspace not found"
+            )
+
+        # Step 2: Verify user has access to this workspace
+        if current_user.team_id != team_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have access to this workspace"
+            )
+
+        # Step 3: Verify user is workspace admin
+        if not current_user.is_workspace_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="Only workspace administrators can delete the workspace"
+            )
+
+        # Step 4: Verify confirmation text matches workspace name
+        if request.confirmation_text != workspace.team_name:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Confirmation text must exactly match workspace name: '{workspace.team_name}'"
+            )
+
+        # Step 5: Perform deletion
+        logger.warning(
+            "workspace_deletion_initiated",
+            team_id=team_id,
+            workspace_name=workspace.team_name,
+            admin_user_id=current_user.user_id,
+            delete_from_slack=request.delete_from_slack
+        )
+
+        deletion_result = await workspace_deletion_service.delete_workspace(
+            team_id=team_id,
+            db=db,
+            delete_from_slack=request.delete_from_slack,
+            admin_user_id=current_user.user_id
+        )
+
+        if not deletion_result["success"]:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Workspace deletion failed: {deletion_result.get('errors', [])}"
+            )
+
+        # Step 6: Delete workspace record itself (after logging)
+        from app.services.workspace_deletion_service import WorkspaceDeletionService
+        deletion_svc = WorkspaceDeletionService()
+        await deletion_svc._delete_workspace_record(team_id, db)
+        await db.commit()
+
+        logger.warning(
+            "workspace_deletion_completed",
+            team_id=team_id,
+            workspace_name=workspace.team_name,
+            admin_user_id=current_user.user_id,
+            stats=deletion_result["deleted"]
+        )
+
+        return DeleteWorkspaceResponse(
+            success=True,
+            message=f"Workspace '{workspace.team_name}' has been permanently deleted",
+            team_id=team_id,
+            workspace_name=workspace.team_name,
+            deletion_stats=deletion_result["deleted"]
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "delete_workspace_error",
+            error=str(e),
+            team_id=team_id
+        )
+        await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete workspace: {str(e)}"
+        )
