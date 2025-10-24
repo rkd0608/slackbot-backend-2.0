@@ -568,6 +568,470 @@ class CrossSourceGraphService:
             return []
 
 
+    async def find_entities_in_content(
+        self,
+        canonical_id: str,
+        team_id: str,
+        entity_types: Optional[List[NodeType]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Find entities mentioned/referenced in a piece of content
+
+        Use case: "What topics/people are discussed in this Slack thread?"
+
+        Args:
+            canonical_id: Content node ID (message, PR, issue, etc.)
+            team_id: Team ID
+            entity_types: Optional filter for specific entity types (PERSON, TOPIC, etc.)
+
+        Returns:
+            List of entity nodes related to this content
+        """
+        try:
+            # Get edges where content mentions/involves/is-about entities
+            relevant_edge_types = [
+                EdgeType.ABOUT,
+                EdgeType.INVOLVES,
+                EdgeType.TAGGED_WITH,
+                EdgeType.AUTHORED_BY
+            ]
+
+            # Get outbound edges from content to entities
+            outbound = await self.link_service.get_outbound_edges(
+                canonical_id,
+                team_id,
+                edge_types=relevant_edge_types
+            )
+
+            if not outbound:
+                return []
+
+            # Get target entity nodes
+            entity_ids = [edge.target_node_id for edge in outbound]
+
+            conditions = [
+                CrossSourceNode.canonical_id.in_(entity_ids),
+                CrossSourceNode.team_id == team_id,
+                CrossSourceNode.source == "derived"  # Entities have source='derived'
+            ]
+
+            if entity_types:
+                conditions.append(CrossSourceNode.node_type.in_(entity_types))
+
+            result = await self.db.execute(
+                select(CrossSourceNode).where(and_(*conditions))
+            )
+            entities = result.scalars().all()
+
+            # Enrich with relationship info
+            return [
+                {
+                    **entity.to_dict(),
+                    'relationship_type': next(
+                        (e.edge_type.value for e in outbound if e.target_node_id == entity.canonical_id),
+                        'unknown'
+                    ),
+                    'confidence': next(
+                        (e.confidence for e in outbound if e.target_node_id == entity.canonical_id),
+                        0.0
+                    )
+                }
+                for entity in entities
+            ]
+
+        except Exception as e:
+            logger.error(
+                "find_entities_in_content_failed",
+                canonical_id=canonical_id,
+                error=str(e)
+            )
+            return []
+
+    async def find_content_about_entity(
+        self,
+        entity_canonical_id: str,
+        team_id: str,
+        source_types: Optional[List[str]] = None,
+        node_types: Optional[List[NodeType]] = None,
+        max_results: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        Find all content (messages, PRs, issues, etc.) that discusses/mentions an entity
+
+        Use case: "Show me all Slack messages and GitHub PRs about 'authentication'"
+
+        Args:
+            entity_canonical_id: Entity node ID (e.g., "entity:topic:authentication")
+            team_id: Team ID
+            source_types: Optional filter by source (e.g., ["slack", "github"])
+            node_types: Optional filter by node type (e.g., [NodeType.MESSAGE, NodeType.PULL_REQUEST])
+            max_results: Maximum results
+
+        Returns:
+            List of content nodes that reference this entity
+        """
+        try:
+            # Get inbound edges to entity (content -> entity)
+            relevant_edge_types = [
+                EdgeType.ABOUT,
+                EdgeType.INVOLVES,
+                EdgeType.TAGGED_WITH,
+                EdgeType.MENTIONS
+            ]
+
+            inbound = await self.link_service.get_inbound_edges(
+                entity_canonical_id,
+                team_id,
+                edge_types=relevant_edge_types,
+                min_confidence=0.3
+            )
+
+            if not inbound:
+                return []
+
+            # Get source content nodes
+            content_ids = [edge.source_node_id for edge in inbound]
+
+            conditions = [
+                CrossSourceNode.canonical_id.in_(content_ids),
+                CrossSourceNode.team_id == team_id,
+                CrossSourceNode.is_deleted == "false"
+            ]
+
+            if source_types:
+                conditions.append(CrossSourceNode.source.in_(source_types))
+
+            if node_types:
+                conditions.append(CrossSourceNode.node_type.in_(node_types))
+
+            result = await self.db.execute(
+                select(CrossSourceNode)
+                .where(and_(*conditions))
+                .order_by(CrossSourceNode.created_at.desc())
+                .limit(max_results)
+            )
+            content_nodes = result.scalars().all()
+
+            # Enrich with relationship info
+            return [
+                {
+                    **node.to_dict(),
+                    'relationship_type': next(
+                        (e.edge_type.value for e in inbound if e.source_node_id == node.canonical_id),
+                        'unknown'
+                    ),
+                    'confidence': next(
+                        (e.confidence for e in inbound if e.source_node_id == node.canonical_id),
+                        0.0
+                    )
+                }
+                for node in content_nodes
+            ]
+
+        except Exception as e:
+            logger.error(
+                "find_content_about_entity_failed",
+                entity_id=entity_canonical_id,
+                error=str(e)
+            )
+            return []
+
+    async def get_entity_expertise(
+        self,
+        person_canonical_id: str,
+        team_id: str,
+        max_topics: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Get topics/technologies a person is expert in
+
+        Use case: "What does John know about?" or "Who should I ask about Redis?"
+
+        Args:
+            person_canonical_id: Person entity node ID (e.g., "entity:person:john_doe")
+            team_id: Team ID
+            max_topics: Maximum topics to return
+
+        Returns:
+            Dict with person info and their areas of expertise
+        """
+        try:
+            # Get person node
+            result = await self.db.execute(
+                select(CrossSourceNode).where(
+                    and_(
+                        CrossSourceNode.canonical_id == person_canonical_id,
+                        CrossSourceNode.team_id == team_id,
+                        CrossSourceNode.node_type == NodeType.PERSON
+                    )
+                )
+            )
+            person_node = result.scalar_one_or_none()
+
+            if not person_node:
+                return {"found": False}
+
+            # Find topics/technologies via EXPERTISE_IN edges
+            expertise_edges = await self.link_service.get_outbound_edges(
+                person_canonical_id,
+                team_id,
+                edge_types=[EdgeType.EXPERTISE_IN, EdgeType.WORKS_WITH]
+            )
+
+            if not expertise_edges:
+                return {
+                    "found": True,
+                    "person": person_node.to_dict(),
+                    "expertise_areas": []
+                }
+
+            # Load expertise nodes
+            topic_ids = [e.target_node_id for e in expertise_edges]
+            result = await self.db.execute(
+                select(CrossSourceNode).where(
+                    CrossSourceNode.canonical_id.in_(topic_ids)
+                )
+            )
+            topic_nodes = {node.canonical_id: node for node in result.scalars().all()}
+
+            # Build expertise list
+            expertise_areas = []
+            for edge in expertise_edges:
+                topic = topic_nodes.get(edge.target_node_id)
+                if topic:
+                    expertise_areas.append({
+                        "topic": topic.title,
+                        "canonical_id": topic.canonical_id,
+                        "type": topic.node_type.value,
+                        "confidence": edge.confidence,
+                        "evidence": edge.evidence
+                    })
+
+            # Sort by confidence
+            expertise_areas.sort(key=lambda x: x["confidence"], reverse=True)
+
+            return {
+                "found": True,
+                "person": person_node.to_dict(),
+                "expertise_areas": expertise_areas[:max_topics]
+            }
+
+        except Exception as e:
+            logger.error(
+                "get_entity_expertise_failed",
+                person_id=person_canonical_id,
+                error=str(e)
+            )
+            return {"found": False, "error": str(e)}
+
+    async def find_related_entities(
+        self,
+        entity_canonical_id: str,
+        team_id: str,
+        min_confidence: float = 0.3,
+        max_results: int = 20
+    ) -> List[Dict[str, Any]]:
+        """
+        Find entities related to a given entity
+
+        Use case: "What topics are related to 'authentication'?"
+
+        Args:
+            entity_canonical_id: Entity node ID
+            team_id: Team ID
+            min_confidence: Minimum confidence threshold
+            max_results: Maximum results
+
+        Returns:
+            List of related entity nodes with relationship info
+        """
+        try:
+            # Get entity-to-entity edges
+            entity_edge_types = [
+                EdgeType.RELATED_TO,
+                EdgeType.SIMILAR_TO,
+                EdgeType.CO_OCCURS_WITH,
+                EdgeType.PARENT_TOPIC,
+                EdgeType.WORKS_WITH
+            ]
+
+            # Get both outbound and inbound edges
+            outbound = await self.link_service.get_outbound_edges(
+                entity_canonical_id,
+                team_id,
+                edge_types=entity_edge_types,
+                min_confidence=min_confidence
+            )
+
+            inbound = await self.link_service.get_inbound_edges(
+                entity_canonical_id,
+                team_id,
+                edge_types=entity_edge_types,
+                min_confidence=min_confidence
+            )
+
+            all_edges = outbound + inbound
+
+            if not all_edges:
+                return []
+
+            # Get related entity IDs
+            related_ids = set()
+            for edge in all_edges:
+                if edge.source_node_id == entity_canonical_id:
+                    related_ids.add(edge.target_node_id)
+                else:
+                    related_ids.add(edge.source_node_id)
+
+            # Load related entities
+            result = await self.db.execute(
+                select(CrossSourceNode).where(
+                    and_(
+                        CrossSourceNode.canonical_id.in_(list(related_ids)),
+                        CrossSourceNode.source == "derived"
+                    )
+                )
+            )
+            entities = result.scalars().all()
+
+            # Enrich with relationship info
+            related = []
+            for entity in entities:
+                # Find edge connecting to this entity
+                connecting_edge = next(
+                    (e for e in all_edges
+                     if entity.canonical_id in [e.source_node_id, e.target_node_id]),
+                    None
+                )
+
+                if connecting_edge:
+                    related.append({
+                        **entity.to_dict(),
+                        'relationship_type': connecting_edge.edge_type.value,
+                        'confidence': connecting_edge.confidence,
+                        'co_occurrence_count': connecting_edge.edge_metadata.get('co_occurrence_count', 0) if connecting_edge.edge_metadata else 0
+                    })
+
+            # Sort by confidence
+            related.sort(key=lambda x: x['confidence'], reverse=True)
+
+            return related[:max_results]
+
+        except Exception as e:
+            logger.error(
+                "find_related_entities_failed",
+                entity_id=entity_canonical_id,
+                error=str(e)
+            )
+            return []
+
+    async def get_entity_timeline(
+        self,
+        entity_canonical_id: str,
+        team_id: str,
+        days_back: int = 90
+    ) -> Dict[str, Any]:
+        """
+        Track entity mentions over time across all sources
+
+        Use case: "When was 'migration' discussed most actively?"
+
+        Args:
+            entity_canonical_id: Entity node ID
+            team_id: Team ID
+            days_back: How many days to look back
+
+        Returns:
+            Timeline data with mention counts by source and time period
+        """
+        try:
+            # Get entity node
+            result = await self.db.execute(
+                select(CrossSourceNode).where(
+                    and_(
+                        CrossSourceNode.canonical_id == entity_canonical_id,
+                        CrossSourceNode.team_id == team_id
+                    )
+                )
+            )
+            entity_node = result.scalar_one_or_none()
+
+            if not entity_node:
+                return {"found": False}
+
+            # Get all content mentioning this entity
+            content_nodes = await self.find_content_about_entity(
+                entity_canonical_id,
+                team_id,
+                max_results=500
+            )
+
+            if not content_nodes:
+                return {
+                    "found": True,
+                    "entity": entity_node.to_dict(),
+                    "mentions": 0
+                }
+
+            # Filter by time range
+            since_date = datetime.utcnow() - timedelta(days=days_back)
+            recent_content = [
+                node for node in content_nodes
+                if datetime.fromisoformat(node['created_at'].replace('Z', '+00:00')) >= since_date
+            ]
+
+            # Group by week and source
+            timeline = {}  # week -> {source -> count}
+            source_totals = {}  # source -> total count
+
+            for node in recent_content:
+                created_at = datetime.fromisoformat(node['created_at'].replace('Z', '+00:00'))
+                week_key = created_at.strftime("%Y-W%W")
+                source = node['source']
+
+                if week_key not in timeline:
+                    timeline[week_key] = {}
+
+                if source not in timeline[week_key]:
+                    timeline[week_key][source] = 0
+
+                timeline[week_key][source] += 1
+
+                # Track source totals
+                source_totals[source] = source_totals.get(source, 0) + 1
+
+            # Find peak activity week
+            peak_week = max(
+                timeline.items(),
+                key=lambda x: sum(x[1].values())
+            ) if timeline else (None, {})
+
+            return {
+                "found": True,
+                "entity": entity_node.to_dict(),
+                "total_mentions": len(recent_content),
+                "date_range": {
+                    "start": since_date.isoformat(),
+                    "end": datetime.utcnow().isoformat()
+                },
+                "mentions_by_source": source_totals,
+                "timeline": timeline,
+                "peak_activity": {
+                    "week": peak_week[0],
+                    "mentions": sum(peak_week[1].values()) if peak_week[0] else 0,
+                    "sources": peak_week[1]
+                } if peak_week[0] else None
+            }
+
+        except Exception as e:
+            logger.error(
+                "get_entity_timeline_failed",
+                entity_id=entity_canonical_id,
+                error=str(e)
+            )
+            return {"found": False, "error": str(e)}
+
+
 def get_cross_source_graph_service(db: AsyncSession) -> CrossSourceGraphService:
     """Get cross-source graph service instance"""
     return CrossSourceGraphService(db)

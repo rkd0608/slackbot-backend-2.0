@@ -20,6 +20,8 @@ from app.models.thread import Thread
 from app.models.channel import Channel
 from app.models.file import File
 from app.models.entity import Entity, EntityRelationship
+from app.models.cross_source_node import CrossSourceNode
+from app.models.cross_source_edge import CrossSourceEdge
 from app.models.query_log import QueryLog
 from app.models.conversation import Conversation
 from app.models.user_expertise import UserExpertise, SignificantEvent
@@ -222,7 +224,11 @@ class WorkspaceDeletionService:
             (UserIntegrationConnection, "user_integration_connections"),
             (Integration, "integrations"),
 
-            # Slack data
+            # Unified Knowledge Graph (delete before legacy entities)
+            (CrossSourceEdge, "cross_source_edges"),
+            (CrossSourceNode, "cross_source_nodes"),
+
+            # Slack data (legacy entities - kept for now)
             (EntityRelationship, "entity_relationships"),
             (Entity, "entities"),
             (SignificantEvent, "significant_events"),

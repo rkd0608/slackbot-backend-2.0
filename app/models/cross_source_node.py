@@ -46,6 +46,15 @@ class NodeType(str, enum.Enum):
     GDRIVE_SHEET = "gdrive_sheet"
     GDRIVE_SLIDE = "gdrive_slide"
 
+    # Entities (derived/extracted knowledge)
+    PERSON = "person"              # People mentioned/identified
+    TOPIC = "topic"                # Topics/concepts discussed
+    PROJECT = "project"            # Projects mentioned
+    TECHNOLOGY = "technology"      # Technologies/tools mentioned
+    ORGANIZATION = "organization"  # Companies/orgs mentioned
+    LOCATION = "location"          # Locations mentioned
+    EVENT = "event"                # Events/meetings mentioned
+
 
 class CrossSourceNode(Base):
     """
@@ -106,6 +115,46 @@ class CrossSourceNode(Base):
     # - Jira: {"status": "In Progress", "story_points": 5, "sprint": "Sprint 23"}
     # - Slack: {"reactions": [...], "reply_count": 5, "is_pinned": true}
 
+    # Entity-specific metadata (for PERSON, TOPIC, PROJECT, etc.)
+    entity_metadata = Column(JSONB, default=dict, nullable=True)
+    # Examples:
+    # - PERSON: {
+    #     "canonical_form": "john_doe",
+    #     "variations": ["John Doe", "J. Doe", "@john"],
+    #     "occurrence_count": 145,
+    #     "entity_type": "PERSON",
+    #     "expertise_areas": ["authentication", "backend"],
+    #     "channels": ["C123", "C456"],
+    #     "first_seen": "2024-01-15T10:00:00Z",
+    #     "last_seen": "2025-01-23T15:30:00Z"
+    #   }
+    # - TOPIC: {
+    #     "canonical_form": "authentication",
+    #     "synonyms": ["auth", "login", "oauth"],
+    #     "occurrence_count": 230,
+    #     "related_technologies": ["OAuth", "JWT", "SAML"],
+    #     "trending_score": 0.85
+    #   }
+    # - PROJECT: {
+    #     "canonical_form": "mobile_app_v2",
+    #     "status": "active",
+    #     "team_size": 5,
+    #     "start_date": "2024-Q1"
+    #   }
+
+    # Graph analytics (computed periodically)
+    importance_score = Column(JSONB, default=dict, nullable=True)
+    # {
+    #   "pagerank": 0.0145,           # PageRank score (importance in graph)
+    #   "centrality": 0.82,           # Betweenness centrality (connector role)
+    #   "degree": 45,                 # Number of connections
+    #   "in_degree": 30,              # Incoming edges
+    #   "out_degree": 15,             # Outgoing edges
+    #   "clustering_coefficient": 0.6, # How interconnected neighbors are
+    #   "community_id": "eng_team_1", # Detected community
+    #   "last_computed": "2025-01-23T12:00:00Z"
+    # }
+
     # Soft delete
     is_deleted = Column(String(10), default="false", nullable=False)
     deleted_at = Column(DateTime, nullable=True)
@@ -123,6 +172,8 @@ class CrossSourceNode(Base):
         Index("idx_node_project_context", "project_context", postgresql_using="gin"),
         Index("idx_node_tags", "tags", postgresql_using="gin"),
         Index("idx_node_source_metadata", "source_metadata", postgresql_using="gin"),
+        Index("idx_node_entity_metadata", "entity_metadata", postgresql_using="gin"),
+        Index("idx_node_importance_score", "importance_score", postgresql_using="gin"),
     )
 
     def to_dict(self):
@@ -149,6 +200,8 @@ class CrossSourceNode(Base):
             'vector_id_semantic': self.vector_id_semantic,
             'vector_id_code': self.vector_id_code,
             'source_metadata': self.source_metadata,
+            'entity_metadata': self.entity_metadata,
+            'importance_score': self.importance_score,
             'is_deleted': self.is_deleted,
         }
 

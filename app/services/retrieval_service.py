@@ -777,7 +777,8 @@ class RetrievalService:
 
         try:
             from app.services.entity_service import entity_service
-            from app.models.entity import Entity
+            from app.models.cross_source_node import CrossSourceNode, NodeType
+            from app.services.cross_source_graph_service import get_cross_source_graph_service
             from sqlalchemy import select, or_
 
             # Tier 1: Extract potential entities using regex (fast, no API cost)
@@ -794,18 +795,30 @@ class RetrievalService:
 
             candidate_texts = [e["text"] for e in candidate_entities]
 
-            # Tier 2: Check which candidates actually exist in our knowledge graph
-            # Only expand entities we have data for (very reliable)
+            # Tier 2: Check which candidates actually exist in our unified knowledge graph
+            # Build canonical IDs for potential entities
             entity_filters = []
+            canonical_id_map = {}  # normalized text -> canonical_id
+
             for text in candidate_texts:
                 normalized = entity_service._normalize_entity(text)
-                entity_filters.append(Entity.canonical_form == normalized)
+                # Try different entity type prefixes
+                for entity_type in ["topic", "technical", "tool", "concept"]:
+                    canonical_id = f"entity:{entity_type}:{normalized}"
+                    entity_filters.append(CrossSourceNode.canonical_id == canonical_id)
+                    canonical_id_map[normalized] = canonical_id
 
             if not entity_filters:
                 return []
 
             result = await db.execute(
-                select(Entity).where(or_(*entity_filters))
+                select(CrossSourceNode).where(
+                    and_(
+                        or_(*entity_filters),
+                        CrossSourceNode.team_id == team_id,
+                        CrossSourceNode.source == "derived"
+                    )
+                )
             )
             found_entities = result.scalars().all()
 
@@ -813,19 +826,24 @@ class RetrievalService:
                 logger.debug("kg_no_matching_entities", candidates=candidate_texts)
                 return []
 
-            entity_texts = [e.canonical_form for e in found_entities]
+            entity_canonical_ids = [e.canonical_id for e in found_entities]
 
-            # Tier 3: Expand using knowledge graph relationships
-            expanded_entities = await self._expand_entities_with_graph(entity_texts, db, team_id, max_related=5)
+            # Tier 3: Expand using unified knowledge graph relationships
+            expanded_entities = await self._expand_entities_with_unified_graph(
+                entity_canonical_ids,
+                db,
+                team_id,
+                max_related=5
+            )
 
             if not expanded_entities:
-                logger.debug("kg_no_expansion", entities=entity_texts)
+                logger.debug("kg_no_expansion", entities=entity_canonical_ids)
                 return []
 
             logger.info(
                 "kg_entity_expansion",
                 candidates=candidate_texts,
-                matched_entities=entity_texts,
+                matched_entities=entity_canonical_ids,
                 expanded_entities=expanded_entities[:5]
             )
 
@@ -839,9 +857,10 @@ class RetrievalService:
                 query_variations.append(variation)
 
             # Strategy 2: If we have multiple original entities, try substitution
-            if len(entity_texts) > 0 and len(expanded_entities) > 0:
+            entity_titles = [e.title for e in found_entities]
+            if len(entity_titles) > 0 and len(expanded_entities) > 0:
                 # Replace first entity with related entity
-                for i, original_entity in enumerate(entity_texts[:2]):
+                for i, original_entity in enumerate(entity_titles[:2]):
                     for expanded_entity in expanded_entities[:2]:
                         if expanded_entity.lower() != original_entity.lower():
                             variation = query.replace(original_entity, expanded_entity)
@@ -861,8 +880,11 @@ class RetrievalService:
         team_id: str,
         max_related: int = 5
     ) -> List[str]:
-        """Expand entity search using knowledge graph relationships"""
+        """
+        DEPRECATED: Use _expand_entities_with_unified_graph instead
 
+        Kept for backwards compatibility with legacy Entity table usage
+        """
         try:
             from app.services.entity_service import entity_service
             from app.models.entity import Entity
@@ -889,6 +911,41 @@ class RetrievalService:
                     # Only add high-confidence relationships
                     if confidence > 0.3:
                         expanded.append(related_entity.canonical_form)
+
+            return expanded[:15]  # Limit total expansion
+        except Exception as e:
+            logger.error("legacy_entity_expansion_error", error=str(e))
+            return []
+
+    async def _expand_entities_with_unified_graph(
+        self,
+        entity_canonical_ids: List[str],
+        db: AsyncSession,
+        team_id: str,
+        max_related: int = 5
+    ) -> List[str]:
+        """Expand entity search using unified knowledge graph relationships"""
+
+        try:
+            from app.services.cross_source_graph_service import get_cross_source_graph_service
+
+            graph_service = get_cross_source_graph_service(db)
+            expanded = []
+
+            for entity_canonical_id in entity_canonical_ids:
+                # Get related entities from unified graph
+                related_entities = await graph_service.find_related_entities(
+                    entity_canonical_id,
+                    team_id,
+                    min_confidence=0.3,
+                    max_results=max_related
+                )
+
+                # Add related entity titles
+                for related in related_entities:
+                    title = related.get("title", "")
+                    if title and title not in expanded:
+                        expanded.append(title)
 
             return expanded[:15]  # Limit total expansion
 

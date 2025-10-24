@@ -43,6 +43,23 @@ class EdgeType(str, enum.Enum):
     ASSIGNED_TO = "assigned_to"
     REVIEWED_BY = "reviewed_by"
 
+    # Entity relationships (Content -> Entity)
+    AUTHORED_BY = "authored_by"        # Content AUTHORED_BY Person
+    ABOUT = "about"                    # Content ABOUT Topic
+    TAGGED_WITH = "tagged_with"        # Content TAGGED_WITH Topic/Technology
+    INVOLVES = "involves"              # Content INVOLVES Person
+    BELONGS_TO = "belongs_to"          # Content BELONGS_TO Project
+    LOCATED_IN = "located_in"          # Content LOCATED_IN Location/Channel
+
+    # Entity relationships (Entity -> Entity)
+    WORKS_WITH = "works_with"          # Person WORKS_WITH Person
+    RELATED_TO = "related_to"          # Topic RELATED_TO Topic
+    SIMILAR_TO = "similar_to"          # Entity SIMILAR_TO Entity
+    EXPERTISE_IN = "expertise_in"      # Person EXPERTISE_IN Topic/Technology
+    MEMBER_OF = "member_of"            # Person MEMBER_OF Project/Organization
+    PARENT_TOPIC = "parent_topic"      # Topic PARENT_TOPIC Topic (hierarchy)
+    CO_OCCURS_WITH = "co_occurs_with"  # Entity CO_OCCURS_WITH Entity
+
 
 class DetectionMethod(str, enum.Enum):
     """How the relationship was detected"""
@@ -52,6 +69,8 @@ class DetectionMethod(str, enum.Enum):
     TEMPORAL_PROXIMITY = "temporal_proximity"  # Time-based correlation
     AUTHOR_CORRELATION = "author_correlation"  # Same author connection
     SEMANTIC_SIMILARITY = "semantic_similarity"  # Vector similarity
+    CO_OCCURRENCE = "co_occurrence"  # Statistical co-occurrence in content
+    HEURISTIC = "heuristic"  # Rule-based heuristic matching
     MANUAL = "manual"  # User-created relationship
 
 

@@ -227,12 +227,28 @@ Only extract significant entities (ignore common words). Limit to 10 most import
         team_id: str,
         db: AsyncSession
     ) -> Entity:
-        """Get existing entity or create new one"""
+        """
+        Get existing entity or create new one
+
+        NOW CREATES ENTITIES IN UNIFIED GRAPH (CrossSourceNode)
+        Returns legacy Entity object for backward compatibility
+        """
 
         # Normalize to canonical form
         canonical_form = self._normalize_entity(entity_text)
 
-        # Check if entity exists (filter by team_id for multi-workspace isolation)
+        # Create/update in unified graph
+        await self._get_or_create_unified_entity(
+            entity_text=entity_text,
+            entity_type=entity_type,
+            canonical_form=canonical_form,
+            channel_id=channel_id,
+            team_id=team_id,
+            db=db
+        )
+
+        # For backward compatibility, also check/update legacy Entity table
+        # This allows gradual migration without breaking existing code
         result = await db.execute(
             select(Entity).where(
                 and_(
@@ -257,13 +273,13 @@ Only extract significant entities (ignore common words). Limit to 10 most import
                 entity.channel_count = len(entity.related_channels)
 
             logger.debug(
-                "entity_updated",
+                "legacy_entity_updated",
                 canonical_form=canonical_form,
                 occurrence_count=entity.occurrence_count,
                 team_id=team_id
             )
         else:
-            # Create new entity
+            # Create new legacy entity
             entity = Entity(
                 entity_text=entity_text,
                 entity_type=entity_type,
@@ -279,7 +295,7 @@ Only extract significant entities (ignore common words). Limit to 10 most import
             db.add(entity)
 
             logger.info(
-                "entity_created",
+                "legacy_entity_created",
                 entity_text=entity_text,
                 canonical_form=canonical_form,
                 type=entity_type,
@@ -287,6 +303,116 @@ Only extract significant entities (ignore common words). Limit to 10 most import
             )
 
         return entity
+
+    async def _get_or_create_unified_entity(
+        self,
+        entity_text: str,
+        entity_type: str,
+        canonical_form: str,
+        channel_id: str,
+        team_id: str,
+        db: AsyncSession
+    ):
+        """
+        Create or update entity in unified knowledge graph (CrossSourceNode)
+
+        This is the NEW way of storing entities.
+        """
+        from app.models.cross_source_node import CrossSourceNode, NodeType
+
+        # Build canonical ID
+        canonical_id = f"entity:{entity_type}:{canonical_form}"
+
+        # Check if entity node exists
+        result = await db.execute(
+            select(CrossSourceNode).where(
+                and_(
+                    CrossSourceNode.canonical_id == canonical_id,
+                    CrossSourceNode.team_id == team_id
+                )
+            )
+        )
+        entity_node = result.scalar_one_or_none()
+
+        # Map entity_type to NodeType
+        type_mapping = {
+            self.TYPE_TECHNICAL: NodeType.TECHNOLOGY,
+            self.TYPE_BUSINESS: NodeType.PROJECT,
+            self.TYPE_TOOL: NodeType.TECHNOLOGY,
+            self.TYPE_CONCEPT: NodeType.TOPIC,
+            "person": NodeType.PERSON,
+            "organization": NodeType.ORGANIZATION,
+            "location": NodeType.LOCATION,
+            "event": NodeType.EVENT
+        }
+        node_type = type_mapping.get(entity_type, NodeType.TOPIC)
+
+        if entity_node:
+            # Update existing node
+            metadata = entity_node.entity_metadata or {}
+            occurrence_count = metadata.get("occurrence_count", 0) + 1
+            channels = metadata.get("channels", [])
+
+            if channel_id not in channels:
+                channels.append(channel_id)
+
+            entity_node.entity_metadata = {
+                **metadata,
+                "canonical_form": canonical_form,
+                "occurrence_count": occurrence_count,
+                "entity_type": entity_type,
+                "channels": channels,
+                "last_seen": datetime.utcnow().isoformat()
+            }
+            entity_node.updated_at = datetime.utcnow()
+
+            logger.debug(
+                "unified_entity_updated",
+                canonical_id=canonical_id,
+                occurrence_count=occurrence_count,
+                team_id=team_id
+            )
+        else:
+            # Create new entity node
+            entity_node = CrossSourceNode(
+                canonical_id=canonical_id,
+                team_id=team_id,
+                source="derived",  # Entities are derived/extracted
+                source_id=f"entity_{canonical_form}",
+                node_type=node_type,
+                title=entity_text,
+                content=f"{entity_type}: {entity_text}",
+                summary=f"Extracted entity from Slack messages",
+                url="",  # Entities don't have URLs
+                visibility="team",
+                author=None,
+                author_id=None,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+                entity_metadata={
+                    "canonical_form": canonical_form,
+                    "variations": [],
+                    "occurrence_count": 1,
+                    "entity_type": entity_type,
+                    "channels": [channel_id],
+                    "first_seen": datetime.utcnow().isoformat(),
+                    "last_seen": datetime.utcnow().isoformat()
+                },
+                importance_score={
+                    "occurrence_count": 1,
+                    "channel_count": 1,
+                    "computed_at": datetime.utcnow().isoformat()
+                }
+            )
+            db.add(entity_node)
+
+            logger.info(
+                "unified_entity_created",
+                canonical_id=canonical_id,
+                entity_text=entity_text,
+                type=entity_type,
+                team_id=team_id
+            )
 
     def _normalize_entity(self, text: str) -> str:
         """Normalize entity text to canonical form"""
@@ -311,7 +437,12 @@ Only extract significant entities (ignore common words). Limit to 10 most import
         team_id: str,
         db: AsyncSession
     ):
-        """Update entity relationships based on co-occurrence"""
+        """
+        Update entity relationships based on co-occurrence
+
+        NOW CREATES EDGES IN UNIFIED GRAPH (CrossSourceEdge)
+        Also maintains legacy EntityRelationship for backward compatibility
+        """
 
         # Create pairs of entities that appeared together
         for i, entity1 in enumerate(entities):
@@ -320,7 +451,12 @@ Only extract significant entities (ignore common words). Limit to 10 most import
                 if entity1.id is None or entity2.id is None:
                     continue
 
-                # Ensure entity1.id < entity2.id for consistency
+                # Create edge in unified graph
+                await self._create_unified_entity_edge(
+                    entity1, entity2, channel_id, team_id, db
+                )
+
+                # Ensure entity1.id < entity2.id for consistency (legacy table)
                 if entity1.id > entity2.id:
                     entity1, entity2 = entity2, entity1
 
@@ -376,11 +512,112 @@ Only extract significant entities (ignore common words). Limit to 10 most import
                     db.add(relationship)
 
                     logger.debug(
-                        "relationship_created",
+                        "legacy_relationship_created",
                         entity1=entity1.canonical_form,
                         entity2=entity2.canonical_form,
                         team_id=team_id
                     )
+
+    async def _create_unified_entity_edge(
+        self,
+        entity1: Entity,
+        entity2: Entity,
+        channel_id: str,
+        team_id: str,
+        db: AsyncSession
+    ):
+        """Create or update CO_OCCURS_WITH edge in unified graph"""
+        from app.models.cross_source_edge import CrossSourceEdge, EdgeType, DetectionMethod
+        import uuid
+
+        # Build canonical IDs for entities
+        canonical_id1 = f"entity:{entity1.entity_type}:{entity1.canonical_form}"
+        canonical_id2 = f"entity:{entity2.entity_type}:{entity2.canonical_form}"
+
+        # Check if edge exists (bidirectional check)
+        result = await db.execute(
+            select(CrossSourceEdge).where(
+                or_(
+                    and_(
+                        CrossSourceEdge.source_node_id == canonical_id1,
+                        CrossSourceEdge.target_node_id == canonical_id2,
+                        CrossSourceEdge.edge_type == EdgeType.CO_OCCURS_WITH
+                    ),
+                    and_(
+                        CrossSourceEdge.source_node_id == canonical_id2,
+                        CrossSourceEdge.target_node_id == canonical_id1,
+                        CrossSourceEdge.edge_type == EdgeType.CO_OCCURS_WITH
+                    )
+                )
+            ).limit(1)
+        )
+        edge = result.scalar_one_or_none()
+
+        if edge:
+            # Update existing edge
+            metadata = edge.edge_metadata or {}
+            co_occurrence_count = metadata.get("co_occurrence_count", 0) + 1
+            channels = metadata.get("channels", [])
+
+            if channel_id not in channels:
+                channels.append(channel_id)
+
+            # Recalculate confidence
+            confidence = self._calculate_confidence(
+                co_occurrence_count,
+                entity1.occurrence_count,
+                entity2.occurrence_count
+            )
+
+            edge.confidence = confidence
+            edge.edge_metadata = {
+                **metadata,
+                "co_occurrence_count": co_occurrence_count,
+                "channels": channels,
+                "last_seen": datetime.utcnow().isoformat()
+            }
+            edge.updated_at = datetime.utcnow()
+
+            logger.debug(
+                "unified_edge_updated",
+                source=canonical_id1,
+                target=canonical_id2,
+                co_occurrence_count=co_occurrence_count
+            )
+        else:
+            # Create new edge
+            confidence = self._calculate_confidence(
+                1,
+                entity1.occurrence_count,
+                entity2.occurrence_count
+            )
+
+            edge = CrossSourceEdge(
+                id=str(uuid.uuid4()),
+                source_node_id=canonical_id1,
+                target_node_id=canonical_id2,
+                edge_type=EdgeType.CO_OCCURS_WITH,
+                team_id=team_id,
+                confidence=confidence,
+                detection_method=DetectionMethod.CO_OCCURRENCE,
+                evidence=f"Co-occurred in Slack messages",
+                edge_metadata={
+                    "co_occurrence_count": 1,
+                    "channels": [channel_id],
+                    "first_seen": datetime.utcnow().isoformat(),
+                    "last_seen": datetime.utcnow().isoformat()
+                },
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+            db.add(edge)
+
+            logger.info(
+                "unified_edge_created",
+                source=canonical_id1,
+                target=canonical_id2,
+                team_id=team_id
+            )
 
     def _calculate_confidence(
         self,
