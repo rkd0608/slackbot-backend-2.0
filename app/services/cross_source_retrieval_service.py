@@ -164,7 +164,7 @@ class CrossSourceRetrievalService:
         """
         try:
             # Generate query embedding
-            query_embedding = await embedding_service.get_embedding(query)
+            query_embedding = await embedding_service.generate_embedding(query)
 
             # Build metadata filter
             metadata_filter = {'team_id': team_id}
@@ -436,6 +436,218 @@ class CrossSourceRetrievalService:
                 error=str(e)
             )
             return []
+
+    async def entity_aware_search(
+        self,
+        query: str,
+        team_id: str,
+        db: AsyncSession,
+        sources: Optional[List[str]] = None,
+        top_k: int = 20
+    ) -> Dict[str, Any]:
+        """
+        NEW: Entity-aware cross-source search using unified knowledge graph
+
+        This is the INTELLIGENT search that automatically:
+        1. Extracts entities from the query
+        2. Finds related entities in the unified graph
+        3. Searches content about those entities across ALL sources
+
+        Use case: "authentication code in TypeScript"
+        - Extracts entity: "authentication"
+        - Finds entity:concept:authentication in graph
+        - Searches Slack messages + GitHub code + any other sources
+        - Returns EVERYTHING in one go!
+
+        Args:
+            query: User's search query
+            team_id: Team ID
+            db: Database session
+            sources: Optional filter by sources
+            top_k: Number of results
+
+        Returns:
+            Dict with:
+                - entity_results: Content found via entity graph
+                - semantic_results: Traditional semantic search results
+                - entities_found: List of entities detected
+                - combined_results: Merged and ranked results
+        """
+        try:
+            logger.info(
+                "entity_aware_search_started",
+                query=query[:100],
+                team_id=team_id
+            )
+
+            graph_service = get_cross_source_graph_service(db)
+
+            # Step 1: Extract entities from query using entity_service patterns
+            from app.services.entity_service import entity_service
+            extracted_entities = entity_service._extract_entities_regex(query)
+
+            entity_results = []
+            entities_found = []
+
+            if extracted_entities:
+                logger.info(
+                    "entities_extracted_from_query",
+                    count=len(extracted_entities),
+                    entities=[e['text'] for e in extracted_entities]
+                )
+
+                # Step 2: For each extracted entity, find it in unified graph
+                for entity_data in extracted_entities:
+                    entity_text = entity_data['text']
+                    entity_type = entity_data['type']
+
+                    # Normalize entity text
+                    normalized = entity_service._normalize_entity(entity_text)
+
+                    # Build canonical ID
+                    canonical_id = f"entity:{entity_type}:{normalized}"
+
+                    # Check if entity exists in unified graph
+                    result = await db.execute(
+                        select(CrossSourceNode).where(
+                            and_(
+                                CrossSourceNode.canonical_id == canonical_id,
+                                CrossSourceNode.team_id == team_id,
+                                CrossSourceNode.source == "derived"
+                            )
+                        )
+                    )
+                    entity_node = result.scalar_one_or_none()
+
+                    if entity_node:
+                        entities_found.append({
+                            'canonical_id': canonical_id,
+                            'text': entity_text,
+                            'type': entity_type,
+                            'occurrences': entity_node.entity_metadata.get('occurrence_count', 0) if entity_node.entity_metadata else 0
+                        })
+
+                        # Step 3: Find ALL content about this entity across sources
+                        content = await graph_service.find_content_about_entity(
+                            entity_canonical_id=canonical_id,
+                            team_id=team_id,
+                            source_types=sources,
+                            max_results=top_k
+                        )
+
+                        entity_results.extend(content)
+
+                        logger.info(
+                            "entity_content_found",
+                            entity=entity_text,
+                            canonical_id=canonical_id,
+                            content_count=len(content)
+                        )
+
+                        # Step 4: Also find related entities
+                        related_entities = await graph_service.find_related_entities(
+                            entity_canonical_id=canonical_id,
+                            team_id=team_id,
+                            min_confidence=0.4,
+                            max_results=5
+                        )
+
+                        # Step 5: Find content about related entities too
+                        for related in related_entities[:3]:  # Top 3 related
+                            related_content = await graph_service.find_content_about_entity(
+                                entity_canonical_id=related['canonical_id'],
+                                team_id=team_id,
+                                source_types=sources,
+                                max_results=5
+                            )
+                            entity_results.extend(related_content)
+
+                            logger.debug(
+                                "related_entity_content_found",
+                                related_entity=related['title'],
+                                content_count=len(related_content)
+                            )
+
+            # Step 6: Also run traditional semantic search
+            semantic_results = await self._semantic_search_cross_source(
+                query=query,
+                team_id=team_id,
+                db=db,
+                sources=sources,
+                top_k=top_k
+            )
+
+            # Step 7: Merge and deduplicate results
+            seen_ids = set()
+            combined_results = []
+
+            # Prioritize entity-based results (more precise)
+            for result in entity_results:
+                canonical_id = result.get('canonical_id')
+                if canonical_id and canonical_id not in seen_ids:
+                    seen_ids.add(canonical_id)
+                    result['retrieval_method'] = 'entity_graph'
+                    result['rank_score'] = result.get('confidence', 0.8) + 0.2  # Boost entity results
+                    combined_results.append(result)
+
+            # Add semantic results
+            for result in semantic_results:
+                canonical_id = result.get('canonical_id')
+                if canonical_id and canonical_id not in seen_ids:
+                    seen_ids.add(canonical_id)
+                    result['retrieval_method'] = 'semantic'
+                    result['rank_score'] = result.get('score', 0.5)
+                    combined_results.append(result)
+
+            # Sort by rank score
+            combined_results.sort(key=lambda x: x.get('rank_score', 0), reverse=True)
+
+            result = {
+                'query': query,
+                'entities_found': entities_found,
+                'entity_results': entity_results[:top_k],
+                'semantic_results': semantic_results[:top_k],
+                'combined_results': combined_results[:top_k],
+                'stats': {
+                    'entities_detected': len(extracted_entities),
+                    'entities_in_graph': len(entities_found),
+                    'entity_based_results': len(entity_results),
+                    'semantic_results': len(semantic_results),
+                    'total_unique': len(combined_results),
+                    'returned': len(combined_results[:top_k])
+                }
+            }
+
+            logger.info(
+                "entity_aware_search_completed",
+                team_id=team_id,
+                stats=result['stats']
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error(
+                "entity_aware_search_failed",
+                query=query,
+                team_id=team_id,
+                error=str(e)
+            )
+            # Fallback to semantic search
+            return {
+                'query': query,
+                'entities_found': [],
+                'entity_results': [],
+                'semantic_results': await self._semantic_search_cross_source(
+                    query=query,
+                    team_id=team_id,
+                    db=db,
+                    sources=sources,
+                    top_k=top_k
+                ),
+                'combined_results': [],
+                'stats': {'error': str(e)}
+            }
 
 
 def get_cross_source_retrieval_service() -> CrossSourceRetrievalService:

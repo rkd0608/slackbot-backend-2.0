@@ -357,7 +357,7 @@ class QueueConsumer:
                         is_dm=is_dm
                     )
                 else:
-                    logger.warning("slack_message_not_stored", event=event)
+                    logger.warning("slack_message_not_stored", event_data=event)
 
                 # If this is a DM, handle as bot interaction (auto-respond)
                 if is_dm and stored_message:

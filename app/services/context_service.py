@@ -260,9 +260,11 @@ class ContextService:
         """Score thread contexts based on original result scores"""
 
         # Create score map
+        # Handle both Slack results (with message_id) and cross-source results (without)
         score_map = {
             r["message_id"]: r.get("final_score", r.get("rrf_score", r.get("score", 0.0)))
             for r in original_results
+            if r.get("message_id")  # Only include results that have message_id
         }
 
         # Score each context

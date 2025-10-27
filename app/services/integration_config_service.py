@@ -5,7 +5,7 @@ Manages which integrations are enabled per team and stores configuration setting
 """
 from typing import List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, or_
 
 from app.core.logging import get_logger
 from app.models.integration import Integration, UserIntegrationConnection

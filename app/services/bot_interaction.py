@@ -30,16 +30,31 @@ class BotInteractionService:
         """
         Merge and deduplicate results from Slack-only and cross-source retrieval
 
+        NOW ENHANCED with entity-aware results!
+        - Prioritizes entity-based results (more precise)
+        - Shows which entities were found
+        - Includes related entity content
+
         Args:
             slack_results: Results from traditional Slack retrieval
-            cross_source_data: Results from cross-source retrieval service
+            cross_source_data: Results from entity-aware cross-source retrieval
 
         Returns:
             Combined and deduplicated results with source indicators
         """
         try:
-            # Extract cross-source results
-            cross_source_results = cross_source_data.get('results', [])
+            # Extract results from entity-aware search
+            # 'combined_results' already merges entity + semantic results
+            cross_source_results = cross_source_data.get('combined_results', [])
+            entities_found = cross_source_data.get('entities_found', [])
+
+            # Log which entities were detected
+            if entities_found:
+                logger.info(
+                    "entities_detected_in_query",
+                    count=len(entities_found),
+                    entities=[e['text'] for e in entities_found]
+                )
 
             # Convert cross-source results to a format compatible with existing pipeline
             # Cross-source results have 'canonical_id', 'source', 'node_type', etc.
@@ -193,15 +208,15 @@ class BotInteractionService:
                     top_k=10
                 )
 
-                # Cross-source retrieval (includes GitHub, future: Jira, Confluence)
+                # Cross-source retrieval with ENTITY-AWARE SEARCH
+                # This uses the unified knowledge graph to automatically find content
+                # about entities across ALL sources (Slack, GitHub, etc.)
                 cross_source_service = get_cross_source_retrieval_service()
-                cross_source_task = cross_source_service.search_across_sources(
+                cross_source_task = cross_source_service.entity_aware_search(
                     query=rewritten_query,
                     team_id=team_id,
                     db=db,
                     sources=["slack", "github"],  # Search both sources
-                    expand_graph=True,  # Enable graph-based context expansion
-                    max_depth=2,  # 2-hop traversal for related content
                     top_k=10
                 )
 
