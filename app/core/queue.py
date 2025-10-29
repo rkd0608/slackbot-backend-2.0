@@ -73,6 +73,14 @@ class QueueManager:
                 routing_key="slack.event.*"
             )
 
+            # Bind processing queue to exchange for workspace tasks
+            # Use # wildcard to match workspace.* (one word) and workspace.*.* (multiple words)
+            processing_queue = await self.channel.get_queue(self.PROCESSING_QUEUE)
+            await processing_queue.bind(
+                exchange=self.exchange,
+                routing_key="workspace.#"
+            )
+
             self._initialized = True
             logger.info("queue_initialized", rabbitmq_host=settings.rabbitmq_host)
 
@@ -114,12 +122,14 @@ class QueueManager:
                     message=aio_message,
                     routing_key=routing_key
                 )
+                logger.info("message_published_to_exchange", routing_key=routing_key, queue=queue)
             else:
                 # Publish directly to queue
                 await self.channel.default_exchange.publish(
                     message=aio_message,
                     routing_key=queue
                 )
+                logger.info("message_published_to_queue", queue=queue)
 
             return True
         except Exception as e:

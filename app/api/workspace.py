@@ -247,8 +247,8 @@ async def configure_channels(
 
         await db.commit()
 
-        # If start_indexing is true and workspace isn't currently indexing
-        if request.start_indexing and workspace.indexing_status != "in_progress":
+        # If start_indexing is true, trigger indexing (allows re-indexing)
+        if request.start_indexing:
             # Track if this is a re-index before changing status
             is_reindex = workspace.indexing_status == "complete"
 
@@ -271,8 +271,8 @@ async def configure_channels(
                     "workspace_id": workspace.id,
                     "bot_token": workspace.bot_access_token,
                     "channel_ids": request.channel_ids  # Only index selected channels
-                }
-                # No routing_key - publish directly to queue
+                },
+                routing_key="workspace.indexing.initial"
             )
 
             logger.info(

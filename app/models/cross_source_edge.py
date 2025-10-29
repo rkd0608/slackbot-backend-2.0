@@ -3,12 +3,13 @@ Cross-source knowledge graph edge model
 
 Stores relationships between nodes across all sources.
 """
-from sqlalchemy import Column, String, Float, DateTime, Index, ForeignKey, Enum as SQLEnum
+from sqlalchemy import Column, String, Float, DateTime, Index, ForeignKey, Enum as SQLEnum, JSON
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
 import enum
 
 from app.core.database import Base
+from app.core.config import settings
 
 
 class EdgeType(str, enum.Enum):
@@ -120,7 +121,8 @@ class CrossSourceEdge(Base):
     link_text = Column(String(1000), nullable=True)  # Actual text/URL that created link
 
     # Additional metadata (avoiding 'metadata' as it's reserved in SQLAlchemy)
-    edge_metadata = Column(JSONB, default=dict, nullable=True)
+    # Use JSON for MySQL, JSONB for PostgreSQL
+    edge_metadata = Column(JSON, default=dict, nullable=True)
     # Examples:
     # - {"commit_sha": "abc123", "file_path": "src/foo.py"}
     # - {"slack_message_ts": "1234.5678", "channel": "engineering"}
@@ -153,8 +155,8 @@ class CrossSourceEdge(Base):
         # Time-based queries
         Index("idx_edge_created", "team_id", "created_at"),
 
-        # GIN index for edge_metadata
-        Index("idx_edge_metadata", "edge_metadata", postgresql_using="gin"),
+        # Note: GIN index for edge_metadata is PostgreSQL-specific
+        # For MySQL, JSON columns are automatically optimized for queries
     )
 
     def to_dict(self):

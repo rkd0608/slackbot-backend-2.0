@@ -159,10 +159,11 @@ class WorkspaceDeletionService:
                 "errors": []
             }
 
-            # List of namespaces to delete
+            # List of namespaces to delete (must match VectorDBManager namespace format)
             namespaces = [
-                f"{team_id}:semantic",
-                f"{team_id}:code"
+                f"{team_id}:messages",  # Slack messages (NAMESPACE_MESSAGES)
+                f"{team_id}:code",      # Code snippets (NAMESPACE_CODE)
+                f"{team_id}:files"      # File embeddings (NAMESPACE_FILES)
             ]
 
             for namespace in namespaces:
@@ -212,8 +213,12 @@ class WorkspaceDeletionService:
         """
         stats = {}
 
+        # STEP 1: Delete models WITHOUT team_id first (they reference tables with team_id)
+        await self._delete_models_without_team_id(team_id, db, stats)
+
+        # STEP 2: Delete models WITH team_id
         # Order of deletion (child tables first, parent tables last)
-        deletion_order = [
+        deletion_order_with_team_id = [
             # Cross-source knowledge graph
             (CrossSourceEdge, "cross_source_edges"),
             (CrossSourceNode, "cross_source_nodes"),
@@ -224,19 +229,10 @@ class WorkspaceDeletionService:
             (UserIntegrationConnection, "user_integration_connections"),
             (Integration, "integrations"),
 
-            # Unified Knowledge Graph (delete before legacy entities)
-            (CrossSourceEdge, "cross_source_edges"),
-            (CrossSourceNode, "cross_source_nodes"),
-
-            # Slack data (legacy entities - kept for now)
+            # Slack data (with team_id)
             (EntityRelationship, "entity_relationships"),
             (Entity, "entities"),
-            (SignificantEvent, "significant_events"),
-            (UserExpertise, "user_expertise"),
-            (Conversation, "conversations"),
             (QueryLog, "query_logs"),
-            (File, "files"),
-            (Thread, "threads"),
             (Message, "messages"),
             (ProcessedEvent, "processed_events"),
             (EventBuffer, "event_buffers"),
@@ -247,15 +243,9 @@ class WorkspaceDeletionService:
 
             # Users (delete last, but keep workspace for final logging)
             (User, "users"),
-
-            # Installation logs (keep for audit trail, but can delete)
-            # (InstallationLog, "installation_logs"),  # Optional: keep for audit
-
-            # Workspace (delete very last)
-            # Will be deleted separately after logging
         ]
 
-        for model, table_name in deletion_order:
+        for model, table_name in deletion_order_with_team_id:
             try:
                 stmt = delete(model).where(model.team_id == team_id)
                 result = await db.execute(stmt)
@@ -280,6 +270,129 @@ class WorkspaceDeletionService:
                 stats[table_name] = f"ERROR: {str(e)}"
 
         return stats
+
+    async def _delete_models_without_team_id(
+        self,
+        team_id: str,
+        db: AsyncSession,
+        stats: Dict[str, int]
+    ):
+        """
+        Delete models that don't have team_id column.
+        These need special handling using joins to related tables.
+        """
+        from sqlalchemy import select as sql_select
+
+        entity_ids = []
+        user_ids = []
+        channel_ids = []
+
+        # Get all entity IDs for this team (used by SignificantEvent and UserExpertise)
+        try:
+            entity_ids_result = await db.execute(
+                sql_select(Entity.id).where(Entity.team_id == team_id)
+            )
+            entity_ids = [row[0] for row in entity_ids_result.all()]
+        except Exception as e:
+            logger.error("failed_to_get_entity_ids", team_id=team_id, error=str(e))
+
+        # Get all user IDs for this team (used by Conversation)
+        try:
+            user_ids_result = await db.execute(
+                sql_select(User.user_id).where(User.team_id == team_id)
+            )
+            user_ids = [row[0] for row in user_ids_result.all()]
+        except Exception as e:
+            logger.error("failed_to_get_user_ids", team_id=team_id, error=str(e))
+
+        # Get all channel IDs for this team (used by File and Thread)
+        try:
+            channel_ids_result = await db.execute(
+                sql_select(Channel.channel_id).where(Channel.team_id == team_id)
+            )
+            channel_ids = [row[0] for row in channel_ids_result.all()]
+        except Exception as e:
+            logger.error("failed_to_get_channel_ids", team_id=team_id, error=str(e))
+
+        # 1. SignificantEvent - delete via entity_id relationship
+        try:
+            if entity_ids:
+                stmt = delete(SignificantEvent).where(
+                    SignificantEvent.primary_entity_id.in_(entity_ids)
+                )
+                result = await db.execute(stmt)
+                stats["significant_events"] = result.rowcount
+                logger.info("table_records_deleted", team_id=team_id, table="significant_events", count=result.rowcount)
+            else:
+                stats["significant_events"] = 0
+
+        except Exception as e:
+            logger.error("table_deletion_failed", team_id=team_id, table="significant_events", error=str(e))
+            stats["significant_events"] = f"ERROR: {str(e)}"
+
+        # 2. UserExpertise - delete via entity_id relationship
+        try:
+            if entity_ids:
+                stmt = delete(UserExpertise).where(
+                    UserExpertise.entity_id.in_(entity_ids)
+                )
+                result = await db.execute(stmt)
+                stats["user_expertise"] = result.rowcount
+                logger.info("table_records_deleted", team_id=team_id, table="user_expertise", count=result.rowcount)
+            else:
+                stats["user_expertise"] = 0
+
+        except Exception as e:
+            logger.error("table_deletion_failed", team_id=team_id, table="user_expertise", error=str(e))
+            stats["user_expertise"] = f"ERROR: {str(e)}"
+
+        # 3. Conversation - delete via user_id relationship
+        try:
+            if user_ids:
+                stmt = delete(Conversation).where(
+                    Conversation.user_id.in_(user_ids)
+                )
+                result = await db.execute(stmt)
+                stats["conversations"] = result.rowcount
+                logger.info("table_records_deleted", team_id=team_id, table="conversations", count=result.rowcount)
+            else:
+                stats["conversations"] = 0
+
+        except Exception as e:
+            logger.error("table_deletion_failed", team_id=team_id, table="conversations", error=str(e))
+            stats["conversations"] = f"ERROR: {str(e)}"
+
+        # 4. File - delete via channel_id relationship
+        try:
+            if channel_ids:
+                stmt = delete(File).where(
+                    File.channel_id.in_(channel_ids)
+                )
+                result = await db.execute(stmt)
+                stats["files"] = result.rowcount
+                logger.info("table_records_deleted", team_id=team_id, table="files", count=result.rowcount)
+            else:
+                stats["files"] = 0
+
+        except Exception as e:
+            logger.error("table_deletion_failed", team_id=team_id, table="files", error=str(e))
+            stats["files"] = f"ERROR: {str(e)}"
+
+        # 5. Thread - delete via channel_id relationship
+        try:
+            if channel_ids:
+                stmt = delete(Thread).where(
+                    Thread.channel_id.in_(channel_ids)
+                )
+                result = await db.execute(stmt)
+                stats["threads"] = result.rowcount
+                logger.info("table_records_deleted", team_id=team_id, table="threads", count=result.rowcount)
+            else:
+                stats["threads"] = 0
+
+        except Exception as e:
+            logger.error("table_deletion_failed", team_id=team_id, table="threads", error=str(e))
+            stats["threads"] = f"ERROR: {str(e)}"
 
     async def _delete_workspace_record(
         self,

@@ -85,7 +85,8 @@ class EntityService:
             if len(stored_entities) > 1:
                 await self._update_co_occurrences(stored_entities, channel_id, team_id, db)
 
-            await db.commit()
+            # Don't commit here - let the caller handle transaction management
+            # await db.commit()
 
             logger.info(
                 "entities_extracted",
@@ -99,8 +100,9 @@ class EntityService:
 
         except Exception as e:
             logger.error("entity_extraction_error", error=str(e), message_id=message_id)
-            await db.rollback()
-            return []
+            # Don't rollback here - let the caller handle transaction management
+            # await db.rollback()
+            raise  # Re-raise so caller can handle
 
     async def _extract_entities_llm(self, text: str) -> List[Dict[str, Any]]:
         """Extract entities using OpenAI GPT-4"""
@@ -340,6 +342,9 @@ Only extract significant entities (ignore common words). Limit to 10 most import
             self.TYPE_BUSINESS: NodeType.PROJECT,
             self.TYPE_TOOL: NodeType.TECHNOLOGY,
             self.TYPE_CONCEPT: NodeType.TOPIC,
+            "topic": NodeType.TOPIC,  # Add explicit mapping for "topic"
+            "technology": NodeType.TECHNOLOGY,  # Add explicit mapping
+            "project": NodeType.PROJECT,  # Add explicit mapping
             "person": NodeType.PERSON,
             "organization": NodeType.ORGANIZATION,
             "location": NodeType.LOCATION,

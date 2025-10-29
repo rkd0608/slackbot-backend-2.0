@@ -3,7 +3,7 @@ import asyncio
 import httpx
 from datetime import datetime
 from typing import List, Dict, Any
-from sqlalchemy import select
+from sqlalchemy import select, or_, and_
 from app.models.workspace import Workspace
 from app.models.channel import Channel
 from app.models.message import Message
@@ -22,10 +22,10 @@ class InitialIndexingWorker:
     async def index_workspace(self, team_id: str, bot_token: str) -> None:
         """Index all accessible channels and messages for a workspace"""
 
-        try:
-            logger.info("initial_indexing_started", team_id=team_id)
+        logger.info("initial_indexing_started", team_id=team_id)
 
-            async for db in db_manager.get_session():
+        async for db in db_manager.get_session():
+            try:
                 # Get workspace
                 stmt = select(Workspace).where(Workspace.team_id == team_id)
                 result = await db.execute(stmt)
@@ -41,6 +41,130 @@ class InitialIndexingWorker:
 
                 # Step 2: Store channel info
                 await self._store_channels(channels, team_id, db)
+
+                # Step 2.5: Collect all user IDs from messages and sync users proactively
+                logger.info("collecting_user_ids_for_sync", team_id=team_id)
+                all_user_ids = set()
+
+                # First pass: collect all user IDs from messages without processing
+                for channel in channels:
+                    channel_id = channel["id"]
+                    is_private = channel.get("is_private", False)
+                    is_archived = channel.get("is_archived", False)
+
+                    # Check if should index based on workspace settings
+                    from app.services.workspace_service import workspace_service
+                    should_index = await workspace_service.should_index_channel(
+                        team_id=team_id,
+                        channel_id=channel_id,
+                        is_private=is_private,
+                        is_archived=is_archived,
+                        db=db
+                    )
+
+                    if not should_index:
+                        continue
+
+                    # Join channel if needed
+                    if not is_private and not channel.get("is_member", False):
+                        await self._join_channel(bot_token, channel_id, channel["name"])
+
+                    # Fetch messages just to collect user IDs
+                    messages = await self._fetch_channel_history(
+                        bot_token=bot_token,
+                        channel_id=channel_id,
+                        limit=1000
+                    )
+
+                    # Collect user IDs
+                    for msg in messages:
+                        if msg.get("user"):
+                            all_user_ids.add(msg.get("user"))
+
+                    await asyncio.sleep(0.5)  # Rate limiting
+
+                # Sync all users at once
+                logger.info("syncing_users", team_id=team_id, user_count=len(all_user_ids))
+                synced_count = 0
+                failed_count = 0
+
+                from app.services.sync_service import sync_service
+                from app.services.slack_client import slack_client_manager
+
+                # Initialize the Slack client with the workspace's bot token
+                slack_client_manager.client.token = bot_token
+
+                for user_id in all_user_ids:
+                    try:
+                        # Fetch user data from Slack API
+                        user_data = await slack_client_manager.get_user_info(user_id)
+
+                        if not user_data:
+                            logger.warning("user_info_unavailable", user_id=user_id)
+                            failed_count += 1
+                            continue
+
+                        # Check if user exists
+                        from app.models.user import User
+                        result = await db.execute(
+                            select(User).where(User.user_id == user_id)
+                        )
+                        existing = result.scalar_one_or_none()
+
+                        profile = user_data.get("profile", {})
+
+                        if existing:
+                            # Update existing
+                            existing.username = user_data.get("name")
+                            existing.real_name = user_data.get("real_name")
+                            existing.display_name = profile.get("display_name")
+                            existing.email = profile.get("email")
+                            existing.is_admin = 1 if user_data.get("is_admin") else 0
+                            existing.is_owner = 1 if user_data.get("is_owner") else 0
+                            existing.is_deleted = 1 if user_data.get("deleted") else 0
+                            existing.title = profile.get("title")
+                            existing.timezone = user_data.get("tz")
+                            existing.avatar_url = profile.get("image_512")
+                            existing.last_active_at = datetime.utcnow()
+                        else:
+                            # Create new
+                            user = User(
+                                user_id=user_id,
+                                team_id=team_id,
+                                username=user_data.get("name"),
+                                real_name=user_data.get("real_name"),
+                                display_name=profile.get("display_name"),
+                                email=profile.get("email"),
+                                is_bot=1 if user_data.get("is_bot") else 0,
+                                is_admin=1 if user_data.get("is_admin") else 0,
+                                is_owner=1 if user_data.get("is_owner") else 0,
+                                is_deleted=1 if user_data.get("deleted") else 0,
+                                title=profile.get("title"),
+                                timezone=user_data.get("tz"),
+                                avatar_url=profile.get("image_512"),
+                                slack_created_at=datetime.fromtimestamp(user_data.get("updated", 0))
+                            )
+                            db.add(user)
+
+                        synced_count += 1
+
+                    except Exception as e:
+                        logger.warning("user_sync_failed", user_id=user_id, error=str(e))
+                        failed_count += 1
+
+                    # Rate limiting to avoid API throttling
+                    await asyncio.sleep(0.1)
+
+                # Commit all user syncs at once
+                await db.commit()
+
+                logger.info(
+                    "users_synced",
+                    team_id=team_id,
+                    synced=synced_count,
+                    failed=failed_count,
+                    total=len(all_user_ids)
+                )
 
                 # Step 3: Index messages from each channel
                 total_messages = 0
@@ -70,6 +194,10 @@ class InitialIndexingWorker:
                             reason="workspace_settings"
                         )
                         continue
+
+                    # Join channel if public (bot needs to be member to read history)
+                    if not is_private and not channel.get("is_member", False):
+                        await self._join_channel(bot_token, channel_id, channel_name)
 
                     # Fetch and index messages
                     messages = await self._fetch_channel_history(
@@ -139,24 +267,27 @@ class InitialIndexingWorker:
                     knowledge_graph_built=True
                 )
 
-        except Exception as e:
-            logger.error(
-                "initial_indexing_error",
-                error=str(e),
-                team_id=team_id
-            )
+            except Exception as e:
+                logger.error(
+                    "initial_indexing_error",
+                    error=str(e),
+                    team_id=team_id
+                )
 
-            # Update workspace status to failed
-            async for db in db_manager.get_session():
-                stmt = select(Workspace).where(Workspace.team_id == team_id)
-                result = await db.execute(stmt)
-                workspace = result.scalar_one_or_none()
+                # Update workspace status to failed (using same db session)
+                try:
+                    stmt = select(Workspace).where(Workspace.team_id == team_id)
+                    result = await db.execute(stmt)
+                    workspace_to_fail = result.scalar_one_or_none()
 
-                if workspace:
-                    workspace.indexing_status = "failed"
-                    await db.commit()
+                    if workspace_to_fail:
+                        workspace_to_fail.indexing_status = "failed"
+                        await db.commit()
+                        logger.info("workspace_marked_as_failed", team_id=team_id)
+                except Exception as db_error:
+                    logger.error("failed_to_update_workspace_status", error=str(db_error), team_id=team_id)
 
-            raise
+                raise
 
     async def _fetch_channels(
         self,
@@ -204,6 +335,39 @@ class InitialIndexingWorker:
                     break
 
         return channels
+
+    async def _join_channel(
+        self,
+        bot_token: str,
+        channel_id: str,
+        channel_name: str
+    ) -> bool:
+        """Join a public channel"""
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://slack.com/api/conversations.join",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                data={"channel": channel_id}
+            )
+
+            data = response.json()
+
+            if data.get("ok"):
+                logger.info(
+                    "channel_joined",
+                    channel_id=channel_id,
+                    channel_name=channel_name
+                )
+                return True
+            else:
+                logger.warning(
+                    "channel_join_failed",
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                    error=data.get("error")
+                )
+                return False
 
     async def _store_channels(
         self,
@@ -323,33 +487,28 @@ class InitialIndexingWorker:
             )
 
     async def _build_entity_relationships(self, team_id: str, db) -> int:
-        """Build entity relationships from co-occurrence patterns"""
+        """Build entity relationships from co-occurrence patterns in unified graph"""
 
         try:
-            from app.models.entity import Entity, EntityRelationship
+            from app.models.cross_source_node import CrossSourceNode
+            from app.models.cross_source_edge import CrossSourceEdge, EdgeType, DetectionMethod
             from sqlalchemy import and_, func
             from datetime import datetime
 
-            # Get all entities for this workspace's channels
-            # First get all channel IDs for this team
-            from app.models.channel import Channel
+            # Get all entity nodes for this workspace from unified graph
             result = await db.execute(
-                select(Channel.channel_id).where(Channel.team_id == team_id)
-            )
-            team_channels = [row[0] for row in result.all()]
-
-            if not team_channels:
-                return 0
-
-            # Get entities that appear in these channels
-            result = await db.execute(
-                select(Entity).where(
-                    func.json_contains(Entity.related_channels, func.json_quote(team_channels[0]))
+                select(CrossSourceNode).where(
+                    and_(
+                        CrossSourceNode.team_id == team_id,
+                        CrossSourceNode.source == "derived",  # Entities are derived
+                        CrossSourceNode.canonical_id.like("entity:%")  # Entity canonical_id format
+                    )
                 )
             )
             entities = result.scalars().all()
 
             if len(entities) < 2:
+                logger.info("not_enough_entities_for_relationships", team_id=team_id, count=len(entities))
                 return 0
 
             relationship_count = 0
@@ -357,14 +516,18 @@ class InitialIndexingWorker:
             # For each pair of entities, check if they co-occur in messages
             for i, entity1 in enumerate(entities):
                 for entity2 in entities[i+1:]:
+                    # Extract entity text from metadata for searching
+                    entity1_text = entity1.entity_metadata.get("canonical_form", entity1.title)
+                    entity2_text = entity2.entity_metadata.get("canonical_form", entity2.title)
+
                     # Check messages containing both entities
                     from app.models.message import Message
                     result = await db.execute(
                         select(func.count(Message.id)).where(
                             and_(
                                 Message.team_id == team_id,
-                                Message.text_processed.ilike(f"%{entity1.entity_text}%"),
-                                Message.text_processed.ilike(f"%{entity2.entity_text}%")
+                                Message.text_processed.ilike(f"%{entity1_text}%"),
+                                Message.text_processed.ilike(f"%{entity2_text}%")
                             )
                         )
                     )
@@ -372,35 +535,50 @@ class InitialIndexingWorker:
 
                     if co_occurrence_count > 0:
                         # Calculate confidence score
-                        confidence = min(1.0, co_occurrence_count / min(entity1.occurrence_count, entity2.occurrence_count))
+                        entity1_count = entity1.entity_metadata.get("occurrence_count", 1)
+                        entity2_count = entity2.entity_metadata.get("occurrence_count", 1)
+                        confidence = min(1.0, co_occurrence_count / min(entity1_count, entity2_count))
 
-                        # Create relationship (ensure entity1.id < entity2.id)
-                        if entity1.id > entity2.id:
-                            entity1, entity2 = entity2, entity1
-
-                        # Check if relationship exists
+                        # Check if edge already exists (bidirectional check)
                         result = await db.execute(
-                            select(EntityRelationship).where(
+                            select(CrossSourceEdge).where(
                                 and_(
-                                    EntityRelationship.entity_id_1 == entity1.id,
-                                    EntityRelationship.entity_id_2 == entity2.id
+                                    CrossSourceEdge.team_id == team_id,
+                                    CrossSourceEdge.edge_type == EdgeType.CO_OCCURS_WITH,
+                                    or_(
+                                        and_(
+                                            CrossSourceEdge.source_node_id == entity1.canonical_id,
+                                            CrossSourceEdge.target_node_id == entity2.canonical_id
+                                        ),
+                                        and_(
+                                            CrossSourceEdge.source_node_id == entity2.canonical_id,
+                                            CrossSourceEdge.target_node_id == entity1.canonical_id
+                                        )
+                                    )
                                 )
                             )
                         )
                         existing = result.scalar_one_or_none()
 
                         if not existing:
-                            relationship = EntityRelationship(
-                                entity_id_1=entity1.id,
-                                entity_id_2=entity2.id,
-                                relationship_type="co_occurs_with",
-                                co_occurrence_count=co_occurrence_count,
-                                confidence_score=round(confidence, 4),
-                                channels=team_channels,
-                                first_seen_at=datetime.utcnow(),
-                                last_seen_at=datetime.utcnow()
+                            # Create edge in unified graph
+                            import uuid
+                            edge = CrossSourceEdge(
+                                id=str(uuid.uuid4()),
+                                source_node_id=entity1.canonical_id,
+                                target_node_id=entity2.canonical_id,
+                                team_id=team_id,
+                                edge_type=EdgeType.CO_OCCURS_WITH,
+                                detection_method=DetectionMethod.CO_OCCURRENCE,
+                                confidence=round(confidence, 4),
+                                edge_metadata={
+                                    "co_occurrence_count": co_occurrence_count,
+                                    "confidence_score": round(confidence, 4)
+                                },
+                                created_at=datetime.utcnow(),
+                                updated_at=datetime.utcnow()
                             )
-                            db.add(relationship)
+                            db.add(edge)
                             relationship_count += 1
 
             await db.commit()

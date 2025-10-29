@@ -56,9 +56,10 @@ async def oauth_callback(
         # Exchange code for access tokens
         oauth_data = await oauth_service.exchange_code_for_token(code, db)
 
-        # Get workspace information
-        access_token = oauth_data["access_token"]
-        workspace_info = await oauth_service.get_workspace_info(access_token)
+        # Get workspace information - use BOT token, not user token
+        # oauth_data["access_token"] is the BOT token
+        bot_token = oauth_data["access_token"]
+        workspace_info = await oauth_service.get_workspace_info(bot_token)
 
         # Get installer email from OAuth
         installer_email = oauth_data.get("authed_user", {}).get("email")
@@ -75,7 +76,9 @@ async def oauth_callback(
         from app.models.user import User
         from sqlalchemy import select
 
-        slack_user_id = oauth_data.get("authed_user", {}).get("id")
+        # Try to extract user ID with multiple fallbacks
+        authed_user = oauth_data.get("authed_user", {})
+        slack_user_id = authed_user.get("id") or authed_user.get("user_id") or workspace.installer_user_id
 
         # Check if user already exists
         stmt = select(User).where(User.user_id == slack_user_id)

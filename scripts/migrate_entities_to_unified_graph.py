@@ -229,7 +229,7 @@ class EntityMigrator:
                         confidence=rel.confidence_score,
                         detection_method=DetectionMethod.CO_OCCURRENCE,
                         evidence=f"Co-occurred {rel.co_occurrence_count} times in Slack messages",
-                        metadata={
+                        edge_metadata={
                             "co_occurrence_count": rel.co_occurrence_count,
                             "channels": rel.channels or [],
                             "first_seen": rel.first_seen_at.isoformat() if rel.first_seen_at else None,

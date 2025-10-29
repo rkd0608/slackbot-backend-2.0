@@ -47,7 +47,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("storage_init_skipped", error=str(e))
 
-        slack_client_manager.initialize()
+        # Slack client is optional - only used for testing/admin operations
+        # Individual workspaces use their own bot tokens from the database
+        try:
+            slack_client_manager.initialize()
+        except Exception as e:
+            logger.warning("slack_client_init_skipped", error=str(e),
+                         reason="Multi-tenant system uses workspace-specific tokens")
 
         # Start metrics updater background task
         from app.services.metrics_updater import start_metrics_updater

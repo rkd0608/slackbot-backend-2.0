@@ -144,7 +144,8 @@ class SyncService:
             user_data = await slack_client_manager.get_user_info(user_id)
 
             if not user_data:
-                logger.error("user_not_found", user_id=user_id)
+                # Log as warning - system will use user_id instead of full name
+                logger.warning("user_info_unavailable", user_id=user_id, reason="Could not fetch user details from Slack API")
                 return None
 
             # Check if user exists
