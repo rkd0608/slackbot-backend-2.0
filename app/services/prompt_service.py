@@ -66,7 +66,7 @@ class PromptService:
         query_analysis: Dict[str, Any],
         context: Dict[str, Any]
     ) -> str:
-        """Build user message with formatted context"""
+        """Build user message with formatted context (cross-source aware)"""
 
         parts = []
 
@@ -74,29 +74,99 @@ class PromptService:
         meta = context.get("meta_context", {})
         if meta:
             parts.append("## Context Overview")
-            parts.append(f"- Found {meta.get('total_threads', 0)} relevant discussions")
-            parts.append(f"- Total messages: {meta.get('total_messages', 0)}")
 
-            channels = meta.get("channels", [])
-            if channels:
-                parts.append(f"- Channels: {', '.join(channels)}")
+            # Cross-source indicator
+            sources_used = meta.get("sources_used", ["slack"])
+            if len(sources_used) > 1:
+                source_names = {"slack": "Slack", "github": "GitHub", "jira": "Jira", "confluence": "Confluence"}
+                source_display = ", ".join([source_names.get(s, s.title()) for s in sources_used])
+                parts.append(f"- **Sources**: {source_display} (cross-source search enabled)")
 
-            participants = meta.get("participants", [])
-            if participants:
-                parts.append(f"- Participants: {', '.join(participants[:10])}")
-                if len(participants) > 10:
-                    parts.append(f"  (and {len(participants) - 10} more)")
+            # Slack-specific metadata
+            if meta.get('total_threads', 0) > 0:
+                parts.append(f"- Found {meta.get('total_threads', 0)} relevant Slack discussions")
+                parts.append(f"- Total Slack messages: {meta.get('total_messages', 0)}")
 
-            time_span = meta.get("time_span")
-            if time_span:
-                parts.append(f"- Time period: {time_span.get('earliest')} to {time_span.get('latest')}")
+                channels = meta.get("channels", [])
+                if channels:
+                    parts.append(f"- Channels: {', '.join(channels)}")
+
+                participants = meta.get("participants", [])
+                if participants:
+                    parts.append(f"- Participants: {', '.join(participants[:10])}")
+                    if len(participants) > 10:
+                        parts.append(f"  (and {len(participants) - 10} more)")
+
+                time_span = meta.get("time_span")
+                if time_span:
+                    parts.append(f"- Time period: {time_span.get('earliest')} to {time_span.get('latest')}")
+
+            # GitHub-specific metadata
+            github_count = meta.get("github_items", 0)
+            if github_count > 0:
+                parts.append(f"- Found {github_count} relevant GitHub items (code files, PRs, issues)")
+
+            # Other sources
+            other_count = meta.get("other_source_items", 0)
+            if other_count > 0:
+                parts.append(f"- Found {other_count} items from other sources")
 
             parts.append("")
+
+        # Add GitHub results
+        github_results = context.get("github_results", [])
+        if github_results:
+            parts.append("## Relevant GitHub Content\n")
+
+            for idx, gh_res in enumerate(github_results[:10], 1):  # Top 10 GitHub items
+                node_type = gh_res.get('node_type', 'code_file')
+                title = gh_res.get('title', 'Untitled')
+                language = gh_res.get('language', 'unknown')
+
+                parts.append(f"### GitHub Item {idx}: {title}")
+                parts.append(f"**Type**: {node_type.replace('_', ' ').title()}")
+
+                if language and language != 'unknown':
+                    parts.append(f"**Language**: {language}")
+
+                if gh_res.get('author'):
+                    parts.append(f"**Author**: {gh_res['author']}")
+
+                if gh_res.get('timestamp'):
+                    parts.append(f"**Last Modified**: {gh_res['timestamp']}")
+
+                # Add repository context
+                project_context = gh_res.get('project_context', {})
+                repo_name = project_context.get('repository_full_name', '')
+                if repo_name:
+                    parts.append(f"**Repository**: {repo_name}")
+
+                # Add URL
+                if gh_res.get('url'):
+                    parts.append(f"**URL**: {gh_res['url']}")
+
+                # Add content (code or description)
+                content = gh_res.get('content', '')
+                if content:
+                    if node_type == 'code_file':
+                        # For code files, show with code formatting hint
+                        preview = content[:2000] + "..." if len(content) > 2000 else content
+                        parts.append(f"\n**Code Content** (Language: {language}):")
+                        parts.append(f"```{language}")
+                        parts.append(preview)
+                        parts.append("```\n")
+                    else:
+                        # For PRs, issues, etc., show as text
+                        preview = content[:1000] + "..." if len(content) > 1000 else content
+                        parts.append(f"\n**Description**:")
+                        parts.append(f"{preview}\n")
+
+                parts.append("")
 
         # Add file results
         file_results = context.get("file_results", [])
         if file_results:
-            parts.append("## Relevant Files\n")
+            parts.append("## Relevant Slack Files\n")
 
             for idx, file_res in enumerate(file_results[:5], 1):  # Limit to top 5 files
                 parts.append(f"### File {idx}: {file_res.get('filename', 'unknown')}")
@@ -196,31 +266,51 @@ class PromptService:
             entity_texts = [e["text"] for e in entities]
             parts.append(f"- Focus on information related to: {', '.join(entity_texts)}")
 
-        # Citation instructions
-        if file_results:
-            parts.append("- When referencing files, provide the download link from the 'Download' field in your answer.")
-            parts.append("- Format file references as: 'filename (Download: URL)'")
-            parts.append("- For message information, cite with [Channel, @User, timestamp] format.")
-        else:
-            parts.append("- Provide citations with [Channel, @User, timestamp] format for all factual claims.")
+        # Citation instructions (cross-source aware)
+        has_github = bool(context.get("github_results"))
+        has_files = bool(file_results)
+        has_slack = bool(thread_contexts)
 
-        parts.append("- If information is not found in the context, explicitly state that.")
+        if has_github or has_files or has_slack:
+            parts.append("- **Citation Format**:")
+
+            if has_slack:
+                parts.append("  - For Slack messages: [#channel, @user, timestamp]")
+
+            if has_github:
+                parts.append("  - For GitHub content: [GitHub: filename/title, @author, URL]")
+                parts.append("  - When including GitHub code, use proper code blocks with language specification")
+
+            if has_files:
+                parts.append("  - For Slack files: 'filename (Download: URL)'")
+
+            parts.append("- Always cite sources for factual claims, code snippets, and technical information")
+
+        parts.append("- If information is not found in the provided context, explicitly state that.")
         parts.append("- Be concise but comprehensive.")
+        parts.append("- When answering from multiple sources (Slack + GitHub), synthesize information coherently.")
 
         return "\n".join(parts)
 
     def _get_base_system_prompt(self) -> str:
-        """Base system prompt for all queries"""
-        return """You are an AI assistant with complete access to a company's Slack workspace history.
+        """Base system prompt for all queries (cross-source aware)"""
+        return """You are an AI assistant with access to a company's unified knowledge base, including:
+- **Slack workspace**: Complete message history, discussions, and files
+- **GitHub repositories**: Code files, pull requests, issues, and commits
+- **Cross-source intelligence**: Connections between discussions and code
 
-Your role is to help users find information, understand discussions, and get insights from their team's communication.
+Your role is to help users find information, understand discussions, and get insights from their team's knowledge across all sources.
 
 Core Principles:
 1. **Accuracy**: Provide information that is directly supported by the provided context
-2. **Citations**: Always cite your sources with [Channel, @User, timestamp] format
+2. **Cross-Source Citations**: Cite sources appropriately:
+   - Slack: [#channel, @user, timestamp]
+   - GitHub: [GitHub: filename/title, @author, URL]
+   - Files: filename (Download: URL)
 3. **Clarity**: Provide clear, well-structured answers
-4. **Thoroughness**: Carefully examine all provided messages and discussions before concluding information is absent
-5. **Context-Aware**: Consider the temporal, social, and topical context of discussions
+4. **Thoroughness**: Carefully examine ALL provided content (Slack, GitHub, files) before concluding information is absent
+5. **Context-Aware**: Consider temporal, social, and topical context across all sources
+6. **Source Integration**: When answering from multiple sources, synthesize information coherently - connect Slack discussions to relevant code, PRs to related conversations, etc.
 
 Formatting Guidelines (Slack-compatible markdown):
 - Use *bold* for emphasis (single asterisks, not double)
@@ -275,19 +365,23 @@ Important:
 - Structure the answer as: Direct answer, then supporting details with citations"""
 
     def _get_code_prompt(self) -> str:
-        """Prompt for code queries"""
+        """Prompt for code queries (cross-source aware)"""
         return """For this CODE query:
+- **Prioritize GitHub code** when available - it's the source of truth for actual implementation
 - Include complete, runnable code snippets with PROPER formatting
 - CRITICAL: Use proper code block syntax:
   ```language
   code here
   ```
   Opening ``` MUST be followed by language, newline, code, then closing ``` on its own line
-- Preserve exact code formatting, indentation, and syntax from the source messages
+- Preserve exact code formatting, indentation, and syntax from the source
 - NEVER split code into "Part 1/2" and "Part 2/2" - provide ALL code in ONE continuous block
 - Add brief explanations OUTSIDE the code blocks
-- Cite the author and context: [Channel, @User, timestamp]
-- If multiple implementations exist, show the most relevant or recent one
+- **Cross-source citations**:
+  - For GitHub code: [GitHub: filename, @author, URL]
+  - For code in Slack messages: [#channel, @user, timestamp]
+- **Connect discussions to code**: If Slack discussions mention specific files/PRs, and those files are provided in GitHub context, reference both
+- If multiple implementations exist, show the most relevant or recent one (prefer GitHub over Slack snippets)
 - Include any important warnings or caveats mentioned in discussions
 - Test your response mentally: can you locate both opening and closing ```? If not, fix it."""
 

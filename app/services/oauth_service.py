@@ -20,19 +20,42 @@ class OAuthService:
         self.client_id = settings.slack_client_id
         self.client_secret = settings.slack_client_secret
         self.redirect_uri = settings.oauth_redirect_uri
-        self.scopes = [
+
+        # User scopes (12 scopes - matches Glean)
+        self.user_scopes = [
+            "channels:read",
+            "groups:read",
+            "im:read",
+            "mpim:read",
+            "search:read.files",
+            "search:read.im",
+            "search:read.mpim",
+            "search:read.private",
+            "search:read.public",
+            "team:read",
+            "users:read",
+            "users:read.email"
+        ]
+
+        # Bot token scopes (17 scopes - matches Glean)
+        self.bot_scopes = [
             "app_mentions:read",
+            "assistant:write",
             "channels:history",
             "channels:read",
             "chat:write",
+            "chat:write.public",
             "commands",
             "groups:history",
             "groups:read",
             "im:history",
-            "im:read",
-            "team:read",
-            "users:read",
-            "users:read.email"
+            "im:write",
+            "links:read",
+            "links:write",
+            "mpim:history",
+            "mpim:read",
+            "reactions:write",
+            "users:read"
         ]
 
     async def generate_oauth_url(self) -> Dict[str, str]:
@@ -48,17 +71,19 @@ class OAuthService:
             ttl=300  # 5 minutes
         )
 
-        # Build OAuth URL
-        scopes_string = ",".join(self.scopes)
+        # Build OAuth URL with both user and bot scopes
+        user_scopes_string = ",".join(self.user_scopes)
+        bot_scopes_string = ",".join(self.bot_scopes)
         oauth_url = (
             f"https://slack.com/oauth/v2/authorize?"
             f"client_id={self.client_id}&"
-            f"scope={scopes_string}&"
+            f"scope={bot_scopes_string}&"
+            f"user_scope={user_scopes_string}&"
             f"redirect_uri={self.redirect_uri}&"
             f"state={state_token}"
         )
 
-        logger.info("oauth_url_generated", state_token=state_token[:10])
+        logger.info("oauth_url_generated", bot_scopes=len(self.bot_scopes), user_scopes=len(self.user_scopes))
 
         return {
             "oauth_url": oauth_url,
@@ -71,7 +96,7 @@ class OAuthService:
         cached_state = await cache_manager.get(f"oauth:state:{state}")
 
         if not cached_state:
-            logger.warning("oauth_state_invalid", state=state[:10])
+            logger.warning("oauth_state_invalid")
             return False
 
         # Delete token after verification (one-time use)
@@ -118,19 +143,21 @@ class OAuthService:
 
         try:
             async with httpx.AsyncClient() as client:
-                # Get team info
-                team_response = await client.post(
-                    "https://slack.com/api/team.info",
-                    headers={"Authorization": f"Bearer {access_token}"}
-                )
-                team_data = team_response.json()
-
-                # Get bot info
+                # Get bot info (includes team_id, team name, etc.)
                 auth_response = await client.post(
                     "https://slack.com/api/auth.test",
                     headers={"Authorization": f"Bearer {access_token}"}
                 )
                 auth_data = auth_response.json()
+
+                # Build team info from auth.test (no need for team.info which requires team:read scope)
+                team_info = {
+                    "id": auth_data.get("team_id"),
+                    "name": auth_data.get("team"),
+                    "url": auth_data.get("url"),
+                    # Note: domain is not in auth.test, will be None
+                    "domain": None
+                }
 
                 # Count users for tier detection
                 users_response = await client.post(
@@ -147,7 +174,7 @@ class OAuthService:
                 user_count = len(active_users)
 
                 return {
-                    "team": team_data.get("team", {}),
+                    "team": team_info,
                     "auth": auth_data,
                     "user_count": user_count
                 }
@@ -209,6 +236,10 @@ class OAuthService:
             existing_workspace.is_active = 1
             existing_workspace.updated_at = datetime.utcnow()
 
+            # Get user ID with fallback
+            authed_user = oauth_data.get("authed_user", {})
+            user_id = authed_user.get("id") or authed_user.get("user_id") or existing_workspace.installer_user_id
+
             # Log reinstallation
             log = InstallationLog(
                 team_id=team["id"],
@@ -217,7 +248,7 @@ class OAuthService:
                     "previous_status": existing_workspace.subscription_status,
                     "scopes": existing_workspace.bot_scopes
                 },
-                user_id=oauth_data.get("authed_user", {}).get("id"),
+                user_id=user_id,
                 created_at=datetime.utcnow()
             )
             db.add(log)
@@ -237,6 +268,10 @@ class OAuthService:
         trial_start = datetime.utcnow()
         trial_end = trial_start + timedelta(days=14)
 
+        # Get installer user ID with fallback
+        authed_user = oauth_data.get("authed_user", {})
+        installer_user_id = authed_user.get("id") or authed_user.get("user_id") or auth.get("user_id", "")
+
         workspace = Workspace(
             team_id=team["id"],
             team_name=team["name"],
@@ -245,7 +280,7 @@ class OAuthService:
             bot_access_token=oauth_data["access_token"],
             bot_user_id=auth["user_id"],
             bot_scopes=oauth_data.get("scope", "").split(","),
-            installer_user_id=oauth_data.get("authed_user", {}).get("id", ""),
+            installer_user_id=installer_user_id,
             installer_email=installer_email,
             installed_at=datetime.utcnow(),
             is_active=1,
@@ -290,9 +325,12 @@ class OAuthService:
             user_count=user_count
         )
 
-        # Trigger initial indexing job
-        from app.services.installation_handler import installation_handler
-        await installation_handler.trigger_initial_indexing(team["id"], db)
+        # NOTE: Initial indexing is NOT triggered here automatically
+        # It will be triggered after user completes onboarding and configures:
+        # - Which channels to index
+        # - Date range preferences
+        # - Other indexing settings
+        # The indexing will be triggered from the onboarding completion endpoint
 
         return workspace
 

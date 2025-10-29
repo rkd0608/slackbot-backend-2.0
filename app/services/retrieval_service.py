@@ -1,9 +1,8 @@
 """Multi-stage retrieval service"""
 from typing import List, Dict, Any, Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, func
+from sqlalchemy import select, and_, or_
 from app.models.message import Message
-from app.models.thread import Thread
 from app.models.channel import Channel
 from app.services.embedding_service import embedding_service
 from app.core.vector_db import vector_db_manager
@@ -27,13 +26,22 @@ class RetrievalService:
         query: str,
         query_analysis: Dict[str, Any],
         user_id: str,
+        team_id: str,  # ✅ REQUIRED - enforces permission filtering
         db: AsyncSession,
-        team_id: Optional[str] = None,
         top_k: int = 50
     ) -> List[Dict[str, Any]]:
-        """Main retrieval pipeline with multiple strategies"""
+        """Main retrieval pipeline with multiple strategies
+
+        SECURITY: team_id is REQUIRED to enforce permission filtering.
+        All results are filtered to only include channels the user has access to.
+        """
 
         logger.info("retrieval_started", query=query[:100], team_id=team_id)
+
+        # Validate team_id is provided
+        if not team_id:
+            logger.error("team_id_required_but_missing", user_id=user_id)
+            raise ValueError("team_id is required for permission filtering")
 
         # Stage 1: Parallel candidate generation
         start_time = time.time()
@@ -101,18 +109,25 @@ class RetrievalService:
         # Stage 4: Hydrate results with human-readable names
         hydrated_results = await self._hydrate_results(final_results, db)
 
-        # Stage 5: Filter by user permissions (if team_id provided)
-        if team_id:
-            from app.services.permission_service import permission_service
-            filtered_results = await permission_service.filter_results_by_permissions(
-                team_id=team_id,
-                user_id=user_id,
-                results=hydrated_results,
-                db=db
-            )
-            return filtered_results
+        # Stage 5: ALWAYS filter by user permissions (SECURITY CRITICAL)
+        from app.services.permission_service import permission_service
+        filtered_results = await permission_service.filter_results_by_permissions(
+            team_id=team_id,
+            user_id=user_id,
+            results=hydrated_results,
+            db=db
+        )
 
-        return hydrated_results
+        logger.info(
+            "permission_filtering_applied",
+            user_id=user_id,
+            team_id=team_id,
+            results_before=len(hydrated_results),
+            results_after=len(filtered_results),
+            filtered_count=len(hydrated_results) - len(filtered_results)
+        )
+
+        return filtered_results
 
     async def _parallel_retrieval(
         self,
@@ -120,9 +135,12 @@ class RetrievalService:
         query_analysis: Dict[str, Any],
         user_id: str,
         db: AsyncSession,
-        team_id: Optional[str] = None
+        team_id: str
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Run multiple retrieval strategies in parallel"""
+        """Run multiple retrieval strategies in parallel
+
+        SECURITY: team_id is REQUIRED for permission filtering
+        """
 
         import asyncio
 
@@ -159,9 +177,12 @@ class RetrievalService:
         query_analysis: Dict[str, Any],
         user_id: str,
         db: AsyncSession,
-        team_id: Optional[str] = None
+        team_id: str
     ) -> List[Dict[str, Any]]:
-        """Semantic vector search using Pinecone (messages + conditional file search)"""
+        """Semantic vector search using Pinecone (messages + conditional file search)
+
+        SECURITY: team_id is REQUIRED for permission filtering
+        """
 
         logger.info("DEBUG_semantic_search_called", query=query[:100])
 
@@ -179,7 +200,8 @@ class RetrievalService:
             kg_expanded_queries = await self._expand_query_with_knowledge_graph(
                 search_query,
                 query_analysis,
-                db
+                db,
+                team_id
             )
 
             # Combine all query variations (original expansions + knowledge graph expansions)
@@ -208,6 +230,7 @@ class RetrievalService:
             message_results = await self._search_message_vectors(
                 query_variations,
                 metadata_filter,
+                team_id,
                 top_k_per_variation=50
             )
 
@@ -225,6 +248,7 @@ class RetrievalService:
                 file_results = await self._search_file_vectors(
                     query_variations,
                     metadata_filter,
+                    team_id,
                     top_k_per_variation=20,
                     min_score=0.25
                 )
@@ -236,6 +260,7 @@ class RetrievalService:
                 file_results = await self._search_file_vectors(
                     query_variations,
                     metadata_filter,
+                    team_id,
                     top_k_per_variation=10,
                     min_score=0.5
                 )
@@ -267,12 +292,75 @@ class RetrievalService:
                         query=query,
                         code_intent=code_intent,
                         db=db,
+                        team_id=team_id,
                         top_k=15  # Get top 15 code snippets
                     )
                     logger.info("code_search_completed", code_count=len(code_results))
 
-            # Combine and deduplicate results (messages + files + code)
-            all_results = message_results + file_results + code_results
+            # STEP 4: GitHub Code Search - Search GitHub repository code if GitHub integration is enabled
+            github_code_results = []
+
+            if settings.enable_code_intelligence:  # Reuse code intelligence flag
+                from app.services.github_services.github_retrieval_service import get_github_retrieval_service
+                from sqlalchemy.orm import Session
+
+                # Check if user has a GitHub connection
+                try:
+                    # Use async DB session for GitHub retrieval service
+                    github_retrieval = get_github_retrieval_service(db)
+
+                    # Search GitHub code with permission filtering
+                    github_code_results = await github_retrieval.search_github_code(
+                        query=query,
+                        user_id=user_id,
+                        team_id=team_id,
+                        top_k=10,  # Get top 10 GitHub code results
+                        search_type="hybrid"  # Use hybrid search (code + semantic)
+                    )
+
+                    # Convert GitHub results to retrieval service format
+                    formatted_github_results = []
+                    for gh_result in github_code_results:
+                        formatted_github_results.append({
+                            "github_content_id": gh_result["content_id"],
+                            "score": gh_result["score"],
+                            "source": "semantic",
+                            "result_type": "github_code",
+                            "metadata": {
+                                "title": gh_result["title"],
+                                "file_path": gh_result["file_path"],
+                                "repository": gh_result["repository"],
+                                "repository_visibility": gh_result["repository_visibility"],
+                                "language": gh_result["language"],
+                                "author": gh_result["author"],
+                                "source_url": gh_result["source_url"],
+                                "content": gh_result["content"][:2000],  # Limit content length
+                                "created_at": gh_result["created_at"],
+                                "updated_at": gh_result["updated_at"],
+                                "indexed_at": gh_result["indexed_at"],
+                                "embedding_type": gh_result["embedding_type"]
+                            }
+                        })
+
+                    github_code_results = formatted_github_results
+
+                    logger.info(
+                        "github_code_search_completed",
+                        query=query[:50],
+                        results_count=len(github_code_results)
+                    )
+
+                except Exception as e:
+                    # GitHub search is optional - don't fail the entire retrieval if it errors
+                    logger.warning(
+                        "github_code_search_failed",
+                        error=str(e),
+                        query=query[:50]
+                    )
+                    github_code_results = []
+
+            # Combine and deduplicate results (messages + files + code + github code)
+            all_results = message_results + file_results + code_results + github_code_results
             all_results.sort(key=lambda x: x.get("score", 0.0), reverse=True)
             results = all_results[:100]  # Top 100
 
@@ -282,6 +370,7 @@ class RetrievalService:
                 message_results=len(message_results),
                 file_results=len(file_results),
                 code_results=len(code_results),
+                github_code_results=len(github_code_results),
                 total_results=len(results),
                 file_intent=file_intent
             )
@@ -297,17 +386,19 @@ class RetrievalService:
         query_analysis: Dict[str, Any],
         user_id: str,
         db: AsyncSession,
-        team_id: Optional[str] = None
+        team_id: str
     ) -> List[Dict[str, Any]]:
-        """Keyword-based search using database"""
+        """Keyword-based search using database
+
+        SECURITY: team_id is REQUIRED for permission filtering
+        """
 
         try:
-            # Build SQL query
-            query_filters = [Message.text.ilike(f"%{query}%")]
-
-            # Add team_id filter if provided
-            if team_id:
-                query_filters.append(Message.team_id == team_id)
+            # Build SQL query with REQUIRED team_id filter
+            query_filters = [
+                Message.text.ilike(f"%{query}%"),
+                Message.team_id == team_id  # ✅ ALWAYS filter by team_id
+            ]
 
             # Add channel filter - distinguish between IDs (uppercase) and names (lowercase)
             if query_analysis.get("channels"):
@@ -393,9 +484,12 @@ class RetrievalService:
         query_analysis: Dict[str, Any],
         user_id: str,
         db: AsyncSession,
-        team_id: Optional[str] = None
+        team_id: str
     ) -> List[Dict[str, Any]]:
-        """Entity-based retrieval using extracted entities and knowledge graph"""
+        """Entity-based retrieval using extracted entities and knowledge graph
+
+        SECURITY: team_id is REQUIRED for permission filtering
+        """
 
         try:
             entities = query_analysis.get("entities", [])
@@ -418,13 +512,11 @@ class RetrievalService:
             )
 
             # Find messages containing these entities (original + related)
-            query_filters = []
+            # ALWAYS include team_id filter
+            query_filters = [Message.team_id == team_id]  # ✅ REQUIRED team_id filter
+
             for entity_text in all_entity_texts:
                 query_filters.append(Message.text.ilike(f"%{entity_text}%"))
-
-            # Add team_id filter if provided
-            if team_id:
-                query_filters.append(Message.team_id == team_id)
 
             if not query_filters:
                 return []
@@ -514,6 +606,7 @@ class RetrievalService:
         self,
         query_variations: List[str],
         metadata_filter: Dict[str, Any],
+        team_id: str,
         top_k_per_variation: int = 50
     ) -> List[Dict[str, Any]]:
         """Search message vectors in Pinecone"""
@@ -537,8 +630,13 @@ class RetrievalService:
             if not query_embedding:
                 continue
 
-            # Query Pinecone for messages
-            matches = vector_db_manager.query(
+            # Query Pinecone for messages from team-specific namespace
+            namespace = vector_db_manager.get_team_namespace(
+                team_id,
+                vector_db_manager.NAMESPACE_MESSAGES
+            )
+            matches = vector_db_manager.query_namespace(
+                namespace=namespace,
                 vector=query_embedding,
                 top_k=top_k_per_variation,
                 filter_dict=message_filter,
@@ -571,6 +669,7 @@ class RetrievalService:
         self,
         query_variations: List[str],
         metadata_filter: Dict[str, Any],
+        team_id: str,
         top_k_per_variation: int = 20,
         min_score: float = 0.7
     ) -> List[Dict[str, Any]]:
@@ -604,8 +703,13 @@ class RetrievalService:
             if not query_embedding:
                 continue
 
-            # Query Pinecone for files
-            matches = vector_db_manager.query(
+            # Query Pinecone for files from team-specific namespace
+            namespace = vector_db_manager.get_team_namespace(
+                team_id,
+                vector_db_manager.NAMESPACE_FILES
+            )
+            matches = vector_db_manager.query_namespace(
+                namespace=namespace,
                 vector=query_embedding,
                 top_k=top_k_per_variation,
                 filter_dict=file_filter,
@@ -660,6 +764,7 @@ class RetrievalService:
         query: str,
         query_analysis: Dict[str, Any],
         db: AsyncSession,
+        team_id: str,
         max_variations: int = 3
     ) -> List[str]:
         """Generate query variations using knowledge graph entity relationships
@@ -672,7 +777,8 @@ class RetrievalService:
 
         try:
             from app.services.entity_service import entity_service
-            from app.models.entity import Entity
+            from app.models.cross_source_node import CrossSourceNode, NodeType
+            from app.services.cross_source_graph_service import get_cross_source_graph_service
             from sqlalchemy import select, or_
 
             # Tier 1: Extract potential entities using regex (fast, no API cost)
@@ -689,18 +795,30 @@ class RetrievalService:
 
             candidate_texts = [e["text"] for e in candidate_entities]
 
-            # Tier 2: Check which candidates actually exist in our knowledge graph
-            # Only expand entities we have data for (very reliable)
+            # Tier 2: Check which candidates actually exist in our unified knowledge graph
+            # Build canonical IDs for potential entities
             entity_filters = []
+            canonical_id_map = {}  # normalized text -> canonical_id
+
             for text in candidate_texts:
                 normalized = entity_service._normalize_entity(text)
-                entity_filters.append(Entity.canonical_form == normalized)
+                # Try different entity type prefixes
+                for entity_type in ["topic", "technical", "tool", "concept"]:
+                    canonical_id = f"entity:{entity_type}:{normalized}"
+                    entity_filters.append(CrossSourceNode.canonical_id == canonical_id)
+                    canonical_id_map[normalized] = canonical_id
 
             if not entity_filters:
                 return []
 
             result = await db.execute(
-                select(Entity).where(or_(*entity_filters))
+                select(CrossSourceNode).where(
+                    and_(
+                        or_(*entity_filters),
+                        CrossSourceNode.team_id == team_id,
+                        CrossSourceNode.source == "derived"
+                    )
+                )
             )
             found_entities = result.scalars().all()
 
@@ -708,19 +826,24 @@ class RetrievalService:
                 logger.debug("kg_no_matching_entities", candidates=candidate_texts)
                 return []
 
-            entity_texts = [e.canonical_form for e in found_entities]
+            entity_canonical_ids = [e.canonical_id for e in found_entities]
 
-            # Tier 3: Expand using knowledge graph relationships
-            expanded_entities = await self._expand_entities_with_graph(entity_texts, db, max_related=5)
+            # Tier 3: Expand using unified knowledge graph relationships
+            expanded_entities = await self._expand_entities_with_unified_graph(
+                entity_canonical_ids,
+                db,
+                team_id,
+                max_related=5
+            )
 
             if not expanded_entities:
-                logger.debug("kg_no_expansion", entities=entity_texts)
+                logger.debug("kg_no_expansion", entities=entity_canonical_ids)
                 return []
 
             logger.info(
                 "kg_entity_expansion",
                 candidates=candidate_texts,
-                matched_entities=entity_texts,
+                matched_entities=entity_canonical_ids,
                 expanded_entities=expanded_entities[:5]
             )
 
@@ -734,9 +857,10 @@ class RetrievalService:
                 query_variations.append(variation)
 
             # Strategy 2: If we have multiple original entities, try substitution
-            if len(entity_texts) > 0 and len(expanded_entities) > 0:
+            entity_titles = [e.title for e in found_entities]
+            if len(entity_titles) > 0 and len(expanded_entities) > 0:
                 # Replace first entity with related entity
-                for i, original_entity in enumerate(entity_texts[:2]):
+                for i, original_entity in enumerate(entity_titles[:2]):
                     for expanded_entity in expanded_entities[:2]:
                         if expanded_entity.lower() != original_entity.lower():
                             variation = query.replace(original_entity, expanded_entity)
@@ -753,10 +877,14 @@ class RetrievalService:
         self,
         entity_texts: List[str],
         db: AsyncSession,
+        team_id: str,
         max_related: int = 5
     ) -> List[str]:
-        """Expand entity search using knowledge graph relationships"""
+        """
+        DEPRECATED: Use _expand_entities_with_unified_graph instead
 
+        Kept for backwards compatibility with legacy Entity table usage
+        """
         try:
             from app.services.entity_service import entity_service
             from app.models.entity import Entity
@@ -765,7 +893,7 @@ class RetrievalService:
 
             for entity_text in entity_texts:
                 # Get entity from database
-                entity = await entity_service.get_entity_by_text(entity_text, db)
+                entity = await entity_service.get_entity_by_text(entity_text, team_id, db)
 
                 if not entity:
                     continue
@@ -773,6 +901,7 @@ class RetrievalService:
                 # Get related entities
                 related = await entity_service.get_related_entities(
                     entity.id,
+                    team_id,
                     db,
                     limit=max_related
                 )
@@ -782,6 +911,41 @@ class RetrievalService:
                     # Only add high-confidence relationships
                     if confidence > 0.3:
                         expanded.append(related_entity.canonical_form)
+
+            return expanded[:15]  # Limit total expansion
+        except Exception as e:
+            logger.error("legacy_entity_expansion_error", error=str(e))
+            return []
+
+    async def _expand_entities_with_unified_graph(
+        self,
+        entity_canonical_ids: List[str],
+        db: AsyncSession,
+        team_id: str,
+        max_related: int = 5
+    ) -> List[str]:
+        """Expand entity search using unified knowledge graph relationships"""
+
+        try:
+            from app.services.cross_source_graph_service import get_cross_source_graph_service
+
+            graph_service = get_cross_source_graph_service(db)
+            expanded = []
+
+            for entity_canonical_id in entity_canonical_ids:
+                # Get related entities from unified graph
+                related_entities = await graph_service.find_related_entities(
+                    entity_canonical_id,
+                    team_id,
+                    min_confidence=0.3,
+                    max_results=max_related
+                )
+
+                # Add related entity titles
+                for related in related_entities:
+                    title = related.get("title", "")
+                    if title and title not in expanded:
+                        expanded.append(title)
 
             return expanded[:15]  # Limit total expansion
 
@@ -798,16 +962,17 @@ class RetrievalService:
     ) -> List[Dict[str, Any]]:
         """Combine multiple ranking lists using Reciprocal Rank Fusion
 
-        Handles message results (message_id), file results (file_id), and code results (snippet_id)
+        Handles message results (message_id), file results (file_id), code results (snippet_id),
+        and GitHub code results (github_content_id)
         """
 
-        # Aggregate scores by result_id (could be message_id, file_id, or snippet_id)
+        # Aggregate scores by result_id (could be message_id, file_id, snippet_id, or github_content_id)
         scores = {}
 
         # Process semantic results
         for idx, result in enumerate(semantic_results):
-            # Use snippet_id for code, file_id for files, message_id for messages
-            result_id = result.get("snippet_id") or result.get("file_id") or result.get("message_id")
+            # Use github_content_id for GitHub code, snippet_id for Slack code, file_id for files, message_id for messages
+            result_id = result.get("github_content_id") or result.get("snippet_id") or result.get("file_id") or result.get("message_id")
             result_type = result.get("result_type", "message")
             rrf_score = 1 / (k + idx + 1)
 
@@ -825,7 +990,7 @@ class RetrievalService:
 
         # Process keyword results
         for idx, result in enumerate(keyword_results):
-            result_id = result.get("snippet_id") or result.get("file_id") or result.get("message_id")
+            result_id = result.get("github_content_id") or result.get("snippet_id") or result.get("file_id") or result.get("message_id")
             result_type = result.get("result_type", "message")
             rrf_score = 1 / (k + idx + 1)
 
@@ -843,7 +1008,7 @@ class RetrievalService:
 
         # Process entity results
         for idx, result in enumerate(entity_results):
-            result_id = result.get("snippet_id") or result.get("file_id") or result.get("message_id")
+            result_id = result.get("github_content_id") or result.get("snippet_id") or result.get("file_id") or result.get("message_id")
             result_type = result.get("result_type", "message")
             rrf_score = 1 / (k + idx + 1)
 
@@ -939,17 +1104,47 @@ class RetrievalService:
         query_analysis: Dict[str, Any],
         user_id: str,
         db: AsyncSession,
-        team_id: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
-        """Build Pinecone metadata filter from query analysis"""
+        team_id: str
+    ) -> Dict[str, Any]:
+        """Build Pinecone metadata filter from query analysis
 
-        filters = {}
+        SECURITY: team_id is REQUIRED for permission filtering
+        Returns a filter dict (never None - always includes team_id and user's accessible channels)
 
-        # Add team_id filter first (multi-tenancy)
-        if team_id:
-            filters["team_id"] = team_id
+        This implements TWO levels of permission filtering:
+        1. PRE-FILTERING: At Pinecone query level (faster, reduces unnecessary retrieval)
+        2. POST-FILTERING: After hydration in retrieve() method (backup safety net)
+        """
 
-        # Channel filter - distinguish between IDs (uppercase) and names (lowercase)
+        # STEP 1: Get user's accessible channels from permission service (PRE-FILTERING)
+        from app.services.permission_service import permission_service
+
+        permission_filter = await permission_service.build_channel_filter(
+            team_id=team_id,
+            user_id=user_id,
+            db=db
+        )
+
+        # Start with permission-based filter (team_id + accessible channels)
+        if permission_filter:
+            filters = permission_filter.copy()  # {"team_id": ..., "channel_id": {"$in": [...]}}
+            logger.info(
+                "permission_prefilter_applied",
+                team_id=team_id,
+                user_id=user_id,
+                accessible_channels_count=len(permission_filter.get("channel_id", {}).get("$in", []))
+            )
+        else:
+            # Fallback: if no accessible channels found, just use team_id
+            # (post-filtering will catch this and return empty results)
+            filters = {"team_id": team_id}
+            logger.warning(
+                "no_accessible_channels_for_prefilter",
+                team_id=team_id,
+                user_id=user_id
+            )
+
+        # STEP 2: If query specifies specific channels, intersect with accessible channels
         channels = query_analysis.get("channels")
         if channels:
             # Separate channel IDs (uppercase, starts with 'C') from channel names (lowercase)
@@ -957,24 +1152,48 @@ class RetrievalService:
             channel_names = [ch for ch in channels if ch and ch not in channel_ids_direct]
 
             # Get channel IDs from names (if any)
-            all_channel_ids = list(channel_ids_direct)  # Start with direct IDs
+            requested_channel_ids = list(channel_ids_direct)  # Start with direct IDs
             if channel_names:
                 result = await db.execute(
                     select(Channel.channel_id)
                     .where(Channel.channel_name.in_(channel_names))
                 )
                 name_to_ids = [row[0] for row in result.all()]
-                all_channel_ids.extend(name_to_ids)
+                requested_channel_ids.extend(name_to_ids)
 
-            if all_channel_ids:
-                filters["channel_id"] = {"$in": all_channel_ids}
+            # SECURITY: Intersect requested channels with user's accessible channels
+            if requested_channel_ids and "channel_id" in filters and "$in" in filters["channel_id"]:
+                accessible = set(filters["channel_id"]["$in"])
+                requested = set(requested_channel_ids)
+                allowed_channels = list(accessible & requested)  # Intersection
+
+                if allowed_channels:
+                    filters["channel_id"] = {"$in": allowed_channels}
+                    logger.info(
+                        "channel_filter_intersected",
+                        requested=len(requested_channel_ids),
+                        accessible=len(accessible),
+                        allowed=len(allowed_channels)
+                    )
+                else:
+                    # User requested channels they don't have access to - return no results
+                    # Set filter to impossible condition
+                    filters["channel_id"] = {"$in": ["IMPOSSIBLE_CHANNEL_ID"]}
+                    logger.warning(
+                        "user_requested_inaccessible_channels",
+                        user_id=user_id,
+                        requested_channels=requested_channel_ids
+                    )
+            elif requested_channel_ids:
+                # No accessible channels restriction (shouldn't happen), use requested
+                filters["channel_id"] = {"$in": requested_channel_ids}
 
             logger.info(
                 "channel_filter_debug",
                 channels_input=channels,
                 channel_ids_direct=channel_ids_direct,
                 channel_names=channel_names,
-                all_channel_ids=all_channel_ids
+                requested_channel_ids=requested_channel_ids
             )
 
         # Temporal filter
@@ -992,7 +1211,7 @@ class RetrievalService:
         if query_analysis.get("has_code_intent"):
             filters["has_code"] = True
 
-        return filters if filters else None
+        return filters  # Always returns a dict with at least team_id
 
     def _rewrite_query(self, query: str, query_analysis: Dict[str, Any]) -> str:
         """Rewrite conversational query to improve semantic matching"""
@@ -1035,7 +1254,7 @@ class RetrievalService:
         results: List[Dict[str, Any]],
         db: AsyncSession
     ) -> List[Dict[str, Any]]:
-        """Hydrate results with message and file data"""
+        """Hydrate results with message, file, and GitHub code data"""
         from sqlalchemy import select
         from app.models.message import Message
         from app.models.file import File
@@ -1087,6 +1306,12 @@ class RetrievalService:
                     result["filename"] = metadata.get("filename", "unknown")
                     result["filetype"] = metadata.get("filetype", "")
                     result["extracted_text"] = metadata.get("text", "")
+
+            elif result_type == "github_code":
+                # GitHub code results are already fully hydrated with metadata
+                # Just pass them through - they already have all needed fields
+                # (title, file_path, repository, language, content, source_url, etc.)
+                pass
 
             else:
                 # Hydrate message result (existing logic)

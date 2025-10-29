@@ -19,6 +19,7 @@ class CodeRetrievalService:
         query: str,
         code_intent: Dict[str, Any],
         db: AsyncSession,
+        team_id: str,
         top_k: int = 20
     ) -> List[Dict[str, Any]]:
         """
@@ -113,9 +114,13 @@ class CodeRetrievalService:
             if vector_db_manager.index is None:
                 vector_db_manager.initialize()
 
-            # Step 4: Query Pinecone code namespace
+            # Step 4: Query team-specific code namespace for multi-tenancy
+            namespace = vector_db_manager.get_team_namespace(
+                team_id,
+                vector_db_manager.NAMESPACE_CODE
+            )
             matches = vector_db_manager.query_namespace(
-                namespace=settings.pinecone_code_namespace,
+                namespace=namespace,
                 vector=query_embedding,
                 top_k=top_k,
                 filter_dict=metadata_filter if metadata_filter else None,

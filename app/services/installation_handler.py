@@ -56,7 +56,7 @@ class InstallationHandler:
             )
 
             # Queue data retention job (delete after 7 days)
-            queue_manager.publish(
+            await queue_manager.publish(
                 queue=queue_manager.PROCESSING_QUEUE,
                 message={
                     "task": "schedule_workspace_deletion",
@@ -146,7 +146,7 @@ class InstallationHandler:
             await db.commit()
 
             # Queue initial indexing job
-            queue_manager.publish(
+            await queue_manager.publish(
                 queue=queue_manager.PROCESSING_QUEUE,
                 message={
                     "task": "initial_workspace_indexing",

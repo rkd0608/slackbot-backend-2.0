@@ -76,7 +76,8 @@ class SlackClientManager:
             response = self.client.users_info(user=user_id)
             return response["user"]
         except SlackApiError as e:
-            logger.error("user_info_error", user_id=user_id, error=str(e))
+            # Log as warning since this is non-critical (system continues with user_id)
+            logger.warning("user_info_fetch_failed", user_id=user_id, error=str(e))
             return None
 
     async def get_channel_info(self, channel_id: str) -> Optional[Dict[str, Any]]:

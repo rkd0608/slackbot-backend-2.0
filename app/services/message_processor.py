@@ -392,7 +392,7 @@ class MessageProcessor:
             return None
 
     async def _get_channel_name(self, channel_id: str, team_id: str, db: AsyncSession) -> Optional[str]:
-        """Get channel name from Channels table"""
+        """Get channel name from Channels table, auto-sync if missing"""
         try:
             # Check if channel exists in database
             result = await db.execute(
@@ -406,7 +406,26 @@ class MessageProcessor:
             if channel and channel.channel_name:
                 return channel.channel_name
 
-            logger.warning("channel_name_not_found", channel_id=channel_id, team_id=team_id)
+            # Channel not in DB - try to sync from Slack API
+            logger.info(
+                "channel_not_in_db_syncing",
+                channel_id=channel_id,
+                team_id=team_id
+            )
+
+            from app.services.sync_service import sync_service
+            synced_channel = await sync_service.sync_channel(channel_id, db)
+
+            if synced_channel and synced_channel.channel_name:
+                logger.info(
+                    "channel_auto_synced",
+                    channel_id=channel_id,
+                    channel_name=synced_channel.channel_name,
+                    is_private=bool(synced_channel.is_private)
+                )
+                return synced_channel.channel_name
+
+            logger.warning("channel_sync_failed", channel_id=channel_id, team_id=team_id)
             return None
 
         except Exception as e:

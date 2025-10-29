@@ -57,9 +57,25 @@ class SyncService:
             # Get channel members
             member_ids = await slack_client_manager.get_channel_members(channel_id)
 
+            # Handle channel name - DMs don't have a "name" field
+            channel_name = channel_data.get("name")
+            if not channel_name:
+                # DM channels (start with 'D') don't have names - generate synthetic name
+                if channel_id.startswith("D"):
+                    # Use user IDs from members to create a readable DM identifier
+                    if member_ids and len(member_ids) > 0:
+                        channel_name = f"DM-{'-'.join(sorted(member_ids[:2]))}"  # Take first 2 users
+                    else:
+                        channel_name = f"DM-{channel_id}"
+                    logger.info("dm_channel_name_generated", channel_id=channel_id, channel_name=channel_name)
+                else:
+                    # Fallback for other channel types without names
+                    channel_name = f"Channel-{channel_id}"
+                    logger.warning("channel_name_missing_using_fallback", channel_id=channel_id, channel_name=channel_name)
+
             if existing:
                 # Update existing
-                existing.channel_name = channel_data.get("name")
+                existing.channel_name = channel_name
                 existing.is_private = 1 if channel_data.get("is_private") else 0
                 existing.is_archived = 1 if channel_data.get("is_archived") else 0
                 existing.topic = channel_data.get("topic", {}).get("value")
@@ -73,7 +89,7 @@ class SyncService:
                 # Create new
                 channel = Channel(
                     channel_id=channel_id,
-                    channel_name=channel_data.get("name"),
+                    channel_name=channel_name,
                     team_id=channel_data.get("context_team_id") or "unknown",
                     is_private=1 if channel_data.get("is_private") else 0,
                     is_archived=1 if channel_data.get("is_archived") else 0,
@@ -94,6 +110,7 @@ class SyncService:
 
         except Exception as e:
             logger.error("sync_channel_error", channel_id=channel_id, error=str(e))
+            await db.rollback()
             return None
 
     async def sync_channel_members(self, channel_id: str, db: AsyncSession) -> bool:
@@ -127,7 +144,8 @@ class SyncService:
             user_data = await slack_client_manager.get_user_info(user_id)
 
             if not user_data:
-                logger.error("user_not_found", user_id=user_id)
+                # Log as warning - system will use user_id instead of full name
+                logger.warning("user_info_unavailable", user_id=user_id, reason="Could not fetch user details from Slack API")
                 return None
 
             # Check if user exists

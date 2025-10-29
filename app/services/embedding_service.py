@@ -97,6 +97,7 @@ class EmbeddingService:
                 "message_id": message.message_id,
                 "channel_id": message.channel_id,
                 "channel_name": message.channel_name or "",
+                "team_id": message.team_id,  # CRITICAL: Required for permission filtering
                 "user_id": message.user_id,
                 "user_name": message.user_name or "",
                 "timestamp": message.timestamp.timestamp(),  # Unix timestamp for numeric filtering
@@ -112,19 +113,31 @@ class EmbeddingService:
                 "has_files": message.has_files
             }
 
-            # Upsert to Pinecone
-            success = vector_db_manager.upsert([{
-                "id": vector_id,
-                "values": embedding,
-                "metadata": metadata
-            }])
+            # Upsert to team-specific namespace for multi-tenancy
+            namespace = vector_db_manager.get_team_namespace(
+                message.team_id,
+                vector_db_manager.NAMESPACE_MESSAGES
+            )
+            success = vector_db_manager.upsert_to_namespace(
+                namespace=namespace,
+                vectors=[{
+                    "id": vector_id,
+                    "values": embedding,
+                    "metadata": metadata
+                }]
+            )
 
             if success:
                 # Update message with vector_id
                 message.vector_id = vector_id
                 await db.commit()
 
-                logger.info("message_embedded", message_id=message_id, vector_id=vector_id)
+                logger.info(
+                    "message_embedded",
+                    message_id=message_id,
+                    vector_id=vector_id,
+                    namespace=namespace
+                )
                 return True
 
             return False
@@ -239,18 +252,40 @@ class EmbeddingService:
             if channel_name:
                 metadata["channel_name"] = channel_name
 
-            # Upsert to Pinecone
-            success = vector_db_manager.upsert([{
-                "id": vector_id,
-                "values": embedding,
-                "metadata": metadata
-            }])
+            # Upsert to team-specific namespace for multi-tenancy
+            # Use files namespace for file embeddings
+            if team_id:
+                namespace = vector_db_manager.get_team_namespace(
+                    team_id,
+                    vector_db_manager.NAMESPACE_FILES
+                )
+                success = vector_db_manager.upsert_to_namespace(
+                    namespace=namespace,
+                    vectors=[{
+                        "id": vector_id,
+                        "values": embedding,
+                        "metadata": metadata
+                    }]
+                )
+            else:
+                # Fallback to default namespace if team_id not available (shouldn't happen)
+                logger.warning("file_missing_team_id", file_id=file_id)
+                success = vector_db_manager.upsert([{
+                    "id": vector_id,
+                    "values": embedding,
+                    "metadata": metadata
+                }])
 
             if success:
                 file_record.vector_id = vector_id
                 await db.commit()
 
-                logger.info("file_embedded", file_id=file_id, vector_id=vector_id)
+                logger.info(
+                    "file_embedded",
+                    file_id=file_id,
+                    vector_id=vector_id,
+                    namespace=namespace if team_id else "default"
+                )
                 return True
 
             return False

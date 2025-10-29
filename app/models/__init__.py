@@ -11,6 +11,14 @@ from app.models.workspace import Workspace, InstallationLog
 from app.models.user_expertise import UserExpertise, SignificantEvent
 from app.models.event_buffer import EventBuffer, EventBufferStatus
 from app.models.processed_event import ProcessedEvent
+from app.models.integration import (
+    Integration,
+    UserIntegrationConnection,
+    ExternalContent,
+    IntegrationSyncJob
+)
+from app.models.cross_source_node import CrossSourceNode, NodeType
+from app.models.cross_source_edge import CrossSourceEdge, EdgeType, DetectionMethod
 
 __all__ = [
     "Message",
@@ -28,5 +36,14 @@ __all__ = [
     "SignificantEvent",
     "EventBuffer",
     "EventBufferStatus",
-    "ProcessedEvent"
+    "ProcessedEvent",
+    "Integration",
+    "UserIntegrationConnection",
+    "ExternalContent",
+    "IntegrationSyncJob",
+    "CrossSourceNode",
+    "NodeType",
+    "CrossSourceEdge",
+    "EdgeType",
+    "DetectionMethod"
 ]

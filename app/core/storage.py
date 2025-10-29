@@ -44,7 +44,9 @@ class StorageManager:
             return False
 
         try:
-            extra_args = {}
+            extra_args = {
+                'ServerSideEncryption': 'AES256'  # Enable server-side encryption
+            }
             if content_type:
                 extra_args['ContentType'] = content_type
 
@@ -54,7 +56,7 @@ class StorageManager:
                 Body=file_data,
                 **extra_args
             )
-            logger.info("file_uploaded", key=key)
+            logger.info("file_uploaded", key=key, encrypted=True)
             return True
         except ClientError as e:
             logger.error("file_upload_error", key=key, error=str(e))

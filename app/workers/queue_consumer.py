@@ -50,17 +50,46 @@ class QueueConsumer:
                 logger.error("queue_not_found", queue=queue_name)
                 return
 
-            # Start consuming with proper callback
-            consumer_tag = await queue.consume(
-                callback=lambda message: self._process_message(message, consumer_name),
-                no_ack=False
-            )
-            self._consumer_tags.append(consumer_tag)
+            # Start a background task to consume messages using async iterator
+            asyncio.create_task(self._consume_loop(queue, consumer_name, queue_name))
 
             logger.info("queue_consumer_registered", queue=queue_name, consumer=consumer_name)
 
         except Exception as e:
             logger.error("queue_consume_start_error", queue=queue_name, error=str(e))
+
+    async def _consume_loop(self, queue: aio_pika.Queue, consumer_name: str, queue_name: str):
+        """Consume messages from queue in a loop"""
+        logger.info("consume_loop_started", consumer=consumer_name, queue=queue_name)
+
+        try:
+            async with queue.iterator() as queue_iter:
+                async for message in queue_iter:
+                    logger.info("message_received_in_loop", consumer=consumer_name, queue=queue_name)
+                    try:
+                        async with message.process():
+                            await self._process_message(message, consumer_name)
+                    except Exception as e:
+                        logger.error("message_processing_error_in_loop", error=str(e), consumer=consumer_name)
+                        # Message will be requeued on exception
+        except Exception as e:
+            logger.error("consume_loop_error", error=str(e), consumer=consumer_name, queue=queue_name)
+            # If loop crashes, try to restart after a delay
+            if self.running:
+                logger.info("restarting_consume_loop", consumer=consumer_name, queue=queue_name)
+                await asyncio.sleep(5)
+                await self._start_consuming(queue_name, consumer_name)
+
+    def _make_callback(self, consumer_name: str):
+        """Create a callback function for message processing"""
+        async def callback(message: aio_pika.IncomingMessage):
+            logger.info("callback_invoked", consumer=consumer_name)
+            try:
+                await self._process_message(message, consumer_name)
+            except Exception as e:
+                logger.error("callback_error", consumer=consumer_name, error=str(e), exc_info=True)
+                await message.reject(requeue=True)
+        return callback
 
     async def stop(self):
         """Stop consuming messages"""
@@ -131,7 +160,9 @@ class QueueConsumer:
                 logger.info(
                     "message_received",
                     queue=queue_name,
-                    routing_key=routing_key
+                    routing_key=routing_key,
+                    message_body=body,
+                    has_routing_key=bool(message.routing_key)
                 )
 
                 # Find handler - try routing key first, then queue name
@@ -357,7 +388,7 @@ class QueueConsumer:
                         is_dm=is_dm
                     )
                 else:
-                    logger.warning("slack_message_not_stored", event=event)
+                    logger.warning("slack_message_not_stored", event_data=event)
 
                 # If this is a DM, handle as bot interaction (auto-respond)
                 if is_dm and stored_message:
