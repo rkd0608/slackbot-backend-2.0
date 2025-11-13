@@ -151,6 +151,21 @@ class SchedulerManager:
         logger.info("scheduled_job_added", job_id="cleanup_processed_events", schedule="Daily 4:00 AM UTC")
 
         # ====================
+        # FILE RECOVERY
+        # ====================
+
+        # Retry failed files - Run every 5 minutes
+        from app.services.file_recovery_service import file_recovery_service
+        self.scheduler.add_job(
+            func=file_recovery_service.retry_failed_files,
+            trigger=IntervalTrigger(minutes=5),
+            id='retry_failed_files',
+            name='Retry Failed Files',
+            replace_existing=True
+        )
+        logger.info("scheduled_job_added", job_id="retry_failed_files", schedule="Every 5 minutes")
+
+        # ====================
         # CLEANUP JOBS
         # ====================
 

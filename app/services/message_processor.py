@@ -56,6 +56,25 @@ class MessageProcessor:
         # Extract message data
         message_data = self._extract_message_data(event, team_id)
 
+        # Skip bot messages - don't index AI-generated responses
+        from app.core.config import settings
+        if message_data.get("user_id") == settings.slack_bot_user_id:
+            logger.debug(
+                "skipping_bot_message_from_processor",
+                user_id=message_data.get("user_id"),
+                message_id=message_data.get("message_id")
+            )
+            return None
+
+        # Skip messages with bot_id (redundant but safe)
+        if event.get("bot_id"):
+            logger.debug(
+                "skipping_bot_id_message",
+                bot_id=event.get("bot_id"),
+                message_id=message_data.get("message_id")
+            )
+            return None
+
         # Enrich with user-name from database
         if message_data.get("user_id") and not message_data.get("user_name"):
             user_name = await self._get_user_name(message_data["user_id"], db)
@@ -123,6 +142,31 @@ class MessageProcessor:
             except Exception as e:
                 logger.error("entity_extraction_failed", error=str(e), message_id=message.message_id)
 
+        # Learn team-specific vocabulary from message (strip code first)
+        if message.text_processed and len(message.text_processed) > 10:
+            try:
+                from app.services.team_vocabulary_service import get_team_vocabulary_service
+                vocab_service = get_team_vocabulary_service(db)
+
+                # Strip code blocks and technical content before learning vocabulary
+                clean_text_for_learning = self._strip_code_for_vocabulary_learning(message.text_processed)
+
+                # Only learn if there's enough natural language content left after stripping code
+                if clean_text_for_learning and len(clean_text_for_learning) > 10:
+                    learned_terms = await vocab_service.learn_from_message(
+                        team_id=message.team_id,
+                        message=clean_text_for_learning,
+                        user_id=message.user_id
+                    )
+                    if learned_terms:
+                        logger.info(
+                            "vocabulary_learned_from_message",
+                            message_id=message.message_id,
+                            learned_count=len(learned_terms)
+                        )
+            except Exception as e:
+                logger.error("vocabulary_learning_failed", error=str(e), message_id=message.message_id)
+
         # Extract and embed code snippets (code intelligence)
         if message.has_code:
             try:
@@ -166,6 +210,55 @@ class MessageProcessor:
             except Exception as e:
                 logger.error("code_intelligence_failed", error=str(e), message_id=message.message_id)
 
+        # Process files attached to message
+        if message.has_files and message.file_ids:
+            try:
+                from app.services.file_processor import file_processor
+
+                # Get file info from event
+                files_info = event.get("files", [])
+
+                logger.info(
+                    "processing_message_files",
+                    message_id=message.message_id,
+                    file_count=len(files_info)
+                )
+
+                for file_info in files_info:
+                    try:
+                        processed_file = await file_processor.process_file(
+                            file_info=file_info,
+                            channel_id=message.channel_id,
+                            user_id=message.user_id,
+                            team_id=team_id,
+                            db=db,
+                            message_id=message.message_id
+                        )
+
+                        if processed_file:
+                            logger.info(
+                                "file_processed_for_message",
+                                message_id=message.message_id,
+                                file_id=processed_file.file_id,
+                                filename=processed_file.filename,
+                                has_text=processed_file.extracted_text is not None
+                            )
+                        else:
+                            logger.warning(
+                                "file_processing_failed",
+                                message_id=message.message_id,
+                                file_id=file_info.get("id")
+                            )
+                    except Exception as file_error:
+                        logger.error(
+                            "file_processing_error",
+                            message_id=message.message_id,
+                            file_id=file_info.get("id"),
+                            error=str(file_error)
+                        )
+            except Exception as e:
+                logger.error("file_processing_batch_failed", error=str(e), message_id=message.message_id)
+
         # Queue for embedding generation
         await queue_manager.publish(
             queue=queue_manager.EMBEDDINGS_QUEUE,
@@ -188,7 +281,11 @@ class MessageProcessor:
         # Parse message content - use CodeDetector for robust code detection
         code_blocks = code_detector.detect_code_blocks(text)
         code_languages = list(set([cb.get("language") for cb in code_blocks if cb.get("language") and cb.get("language") != "unknown"]))
-        has_code = len(code_languages) > 0
+
+        # Check for code blocks OR plain text that looks like code (CLI commands, etc.)
+        has_code_blocks = len(code_languages) > 0
+        looks_like_code = code_detector._looks_like_code(text) if text and len(text) > 10 else False
+        has_code = has_code_blocks or looks_like_code
 
         links = self._extract_links(text)
         mentioned_users = self._extract_mentions(text)
@@ -271,6 +368,45 @@ class MessageProcessor:
         processed = re.sub(r'\s+', ' ', processed).strip()
 
         return processed
+
+    def _strip_code_for_vocabulary_learning(self, text: str) -> str:
+        """
+        Remove code blocks and technical content before vocabulary learning.
+        This prevents the vocabulary system from learning code patterns.
+
+        Args:
+            text: Original message text
+
+        Returns:
+            Text with code blocks, inline code, and URLs removed
+        """
+        cleaned = text
+
+        # Remove multi-line code blocks (```code```)
+        cleaned = re.sub(r'```[\s\S]*?```', ' ', cleaned)
+
+        # Remove inline code (`code`)
+        cleaned = re.sub(r'`[^`]+`', ' ', cleaned)
+
+        # Remove URLs
+        cleaned = re.sub(r'https?://\S+|www\.\S+', ' ', cleaned)
+
+        # Remove file paths
+        cleaned = re.sub(r'[/\\][\w/\\.-]+', ' ', cleaned)
+
+        # Remove email addresses
+        cleaned = re.sub(r'[\w\.-]+@[\w\.-]+', ' ', cleaned)
+
+        # Remove JSON-like structures
+        cleaned = re.sub(r'\{[^}]+\}', ' ', cleaned)
+
+        # Remove array-like structures
+        cleaned = re.sub(r'\[[^\]]+\]', ' ', cleaned)
+
+        # Clean up extra whitespace
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+        return cleaned
 
     def _calculate_importance(self, event: Dict[str, Any]) -> float:
         """Calculate message importance score"""

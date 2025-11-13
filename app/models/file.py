@@ -15,6 +15,7 @@ class File(Base):
     # Slack identifiers
     file_id = Column(String(50), unique=True, nullable=False, index=True)
     message_id = Column(String(50), nullable=True, index=True)  # Associated message
+    team_id = Column(String(50), nullable=False, index=True)  # Workspace isolation - SECURITY CRITICAL
     channel_id = Column(String(50), nullable=False, index=True)
     user_id = Column(String(50), nullable=False)
 
@@ -38,6 +39,12 @@ class File(Base):
     is_processed = Column(Integer, default=0)
     processing_error = Column(Text, nullable=True)
 
+    # Retry mechanism
+    retry_count = Column(Integer, default=0)
+    max_retries = Column(Integer, default=5)
+    last_retry_at = Column(DateTime, nullable=True)
+    next_retry_at = Column(DateTime, nullable=True)  # Exponential backoff
+
     # Embedding reference
     vector_id = Column(String(100), nullable=True)
 
@@ -50,4 +57,6 @@ class File(Base):
     __table_args__ = (
         Index('idx_channel_created', 'channel_id', 'created_at'),
         Index('idx_filetype', 'filetype'),
+        Index('idx_team_channel', 'team_id', 'channel_id'),  # Multi-tenancy security
+        Index('idx_team_file', 'team_id', 'file_id'),  # Secure file lookups
     )

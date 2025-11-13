@@ -431,6 +431,77 @@ class NotificationService:
                 team_id=workspace.team_id
             )
 
+    async def send_integration_notification(
+        self,
+        team_id: str,
+        message: str,
+        db: AsyncSession
+    ) -> bool:
+        """
+        Send integration-related notification to workspace installer
+
+        Args:
+            team_id: Workspace team ID
+            message: Message text (supports markdown)
+            db: Database session
+
+        Returns:
+            True if notification sent successfully
+        """
+        try:
+            # Get workspace
+            stmt = select(Workspace).where(Workspace.team_id == team_id)
+            result = await db.execute(stmt)
+            workspace = result.scalar_one_or_none()
+
+            if not workspace:
+                logger.error("workspace_not_found_for_notification", team_id=team_id)
+                return False
+
+            if not workspace.installer_user_id:
+                logger.error("no_installer_user_id", team_id=team_id)
+                return False
+
+            # Convert markdown message to Slack blocks
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": message
+                    }
+                }
+            ]
+
+            # Send DM
+            success = await self._send_slack_dm(
+                bot_token=workspace.bot_access_token,
+                user_id=workspace.installer_user_id,
+                blocks=blocks
+            )
+
+            if success:
+                logger.info(
+                    "integration_notification_sent",
+                    team_id=team_id,
+                    user_id=workspace.installer_user_id
+                )
+            else:
+                logger.error(
+                    "integration_notification_failed",
+                    team_id=team_id
+                )
+
+            return success
+
+        except Exception as e:
+            logger.error(
+                "integration_notification_error",
+                error=str(e),
+                team_id=team_id
+            )
+            return False
+
     async def _send_slack_dm(
         self,
         bot_token: str,

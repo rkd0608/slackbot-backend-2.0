@@ -169,7 +169,7 @@ class WorkspaceService:
             except Exception as notify_error:
                 logger.error("query_limit_notification_failed", error=str(notify_error))
 
-            # Invalidate cache
+            # Invalidate workspace cache (but not token cache - tokens don't change on query usage)
             await cache_manager.delete(f"workspace:{team_id}")
 
     async def get_workspace_token(
@@ -177,10 +177,192 @@ class WorkspaceService:
         team_id: str,
         db: AsyncSession
     ) -> Optional[str]:
-        """Get bot access token for workspace"""
+        """
+        Get bot access token for workspace with Redis caching
 
+        Tokens are cached for 1 hour since they rarely change.
+        Cache is invalidated when workspace settings are updated.
+        """
+        # Try cache first (token-specific cache key)
+        cache_key = f"workspace_token:{team_id}"
+        cached_token = await cache_manager.get(cache_key)
+
+        if cached_token:
+            logger.debug(
+                "workspace_token_cache_hit",
+                team_id=team_id
+            )
+            return cached_token
+
+        # Cache miss - fetch from database
         workspace = await self.get_workspace_by_team_id(team_id, db)
-        return workspace.bot_access_token if workspace else None
+
+        if workspace and workspace.bot_access_token:
+            # Cache token for 1 hour (3600 seconds)
+            # Tokens rarely change, so longer TTL is acceptable
+            await cache_manager.set(
+                cache_key,
+                workspace.bot_access_token,
+                ttl=3600
+            )
+
+            logger.info(
+                "workspace_token_cached",
+                team_id=team_id,
+                ttl=3600
+            )
+
+            return workspace.bot_access_token
+
+        return None
+
+    async def get_installer_user_token(
+        self,
+        team_id: str,
+        db: AsyncSession
+    ) -> Optional[str]:
+        """
+        Get installer's decrypted user access token for Glean-style indexing
+
+        This token is used for workspace-wide indexing since the installer
+        (usually admin/owner) has the broadest access to channels and DMs.
+
+        Tokens are cached for 1 hour with encryption/decryption overhead minimized.
+        """
+        # Try cache first (token-specific cache key)
+        cache_key = f"installer_user_token:{team_id}"
+        cached_token = await cache_manager.get(cache_key)
+
+        if cached_token:
+            logger.debug(
+                "installer_user_token_cache_hit",
+                team_id=team_id
+            )
+            return cached_token
+
+        # Cache miss - fetch and decrypt from database
+        workspace = await self.get_workspace_by_team_id(team_id, db)
+
+        if workspace and workspace.installer_user_token:
+            try:
+                from app.core.encryption import get_encryption_service
+                encryption_service = get_encryption_service()
+
+                # Decrypt the token
+                decrypted_token = encryption_service.decrypt(workspace.installer_user_token)
+
+                # Cache decrypted token for 1 hour
+                await cache_manager.set(
+                    cache_key,
+                    decrypted_token,
+                    ttl=3600
+                )
+
+                logger.info(
+                    "installer_user_token_decrypted_cached",
+                    team_id=team_id,
+                    ttl=3600
+                )
+
+                return decrypted_token
+
+            except Exception as e:
+                logger.error(
+                    "installer_user_token_decryption_failed",
+                    error=str(e),
+                    team_id=team_id
+                )
+                return None
+
+        logger.warning(
+            "installer_user_token_not_found",
+            team_id=team_id,
+            message="No installer user token stored. May need re-installation."
+        )
+        return None
+
+    async def get_user_token(
+        self,
+        team_id: str,
+        user_id: str,
+        db: AsyncSession
+    ) -> Optional[str]:
+        """
+        Get a specific user's decrypted access token for permission checks
+
+        Used at query time to verify user has access to returned results.
+        Falls back to bot token if user token not available.
+        """
+        # Try cache first
+        cache_key = f"user_token:{team_id}:{user_id}"
+        cached_token = await cache_manager.get(cache_key)
+
+        if cached_token:
+            logger.debug(
+                "user_token_cache_hit",
+                team_id=team_id,
+                user_id=user_id
+            )
+            return cached_token
+
+        # Cache miss - fetch and decrypt from database
+        from app.models.user import User
+
+        stmt = select(User).where(
+            User.team_id == team_id,
+            User.user_id == user_id
+        )
+        result = await db.execute(stmt)
+        user = result.scalar_one_or_none()
+
+        if user and user.access_token:
+            try:
+                from app.core.encryption import get_encryption_service
+                encryption_service = get_encryption_service()
+
+                # Decrypt the token
+                decrypted_token = encryption_service.decrypt(user.access_token)
+
+                # Cache for 1 hour
+                await cache_manager.set(
+                    cache_key,
+                    decrypted_token,
+                    ttl=3600
+                )
+
+                logger.debug(
+                    "user_token_decrypted_cached",
+                    team_id=team_id,
+                    user_id=user_id
+                )
+
+                return decrypted_token
+
+            except Exception as e:
+                logger.error(
+                    "user_token_decryption_failed",
+                    error=str(e),
+                    team_id=team_id,
+                    user_id=user_id
+                )
+                return None
+
+        logger.debug(
+            "user_token_not_found",
+            team_id=team_id,
+            user_id=user_id
+        )
+        return None
+
+    async def invalidate_user_token_cache(
+        self,
+        team_id: str,
+        user_id: str
+    ) -> None:
+        """Invalidate cached user token (e.g., after re-authentication)"""
+        cache_key = f"user_token:{team_id}:{user_id}"
+        await cache_manager.delete(cache_key)
+        logger.info("user_token_cache_invalidated", team_id=team_id, user_id=user_id)
 
     async def update_workspace_activity(
         self,
@@ -251,6 +433,26 @@ class WorkspaceService:
             return False
 
         return True
+
+    async def invalidate_workspace_cache(
+        self,
+        team_id: str
+    ) -> None:
+        """
+        Invalidate all workspace caches (workspace data + token)
+
+        Call this when:
+        - Workspace token is updated (OAuth refresh, reinstall)
+        - Workspace settings are changed
+        - Workspace subscription status changes
+        """
+        await cache_manager.delete(f"workspace:{team_id}")
+        await cache_manager.delete(f"workspace_token:{team_id}")
+
+        logger.info(
+            "workspace_cache_invalidated",
+            team_id=team_id
+        )
 
 
 # Global workspace service instance

@@ -79,7 +79,11 @@ class CrossSourceNode(Base):
     # Source information
     source = Column(String(50), nullable=False, index=True)  # "github", "slack", "jira"
     source_id = Column(String(500), nullable=False)  # ID in source system
-    node_type = Column(SQLEnum(NodeType), nullable=False, index=True)
+    node_type = Column(
+        SQLEnum(NodeType, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        index=True
+    )
 
     # Core content (denormalized for performance)
     title = Column(String(1000), nullable=False)

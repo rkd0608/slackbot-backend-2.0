@@ -142,24 +142,105 @@ class SlackClientManager:
         """Fetch file information from Slack API"""
         try:
             response = self.client.files_info(file=file_id)
-            return response["file"]
+            file_data = response["file"]
+
+            # Try to get a public URL using files.sharedPublicURL
+            # This generates a time-limited public URL that doesn't require authentication
+            try:
+                public_response = self.client.files_sharedPublicURL(file=file_id)
+                if public_response["ok"]:
+                    file_data["permalink_public"] = public_response["file"].get("permalink_public")
+                    logger.info(
+                        "generated_public_url",
+                        file_id=file_id,
+                        has_public_url=bool(public_response["file"].get("permalink_public"))
+                    )
+            except SlackApiError as e:
+                # Not all files can have public URLs - this is non-critical
+                logger.debug("public_url_not_available", file_id=file_id, error=str(e))
+
+            return file_data
         except SlackApiError as e:
             logger.error("file_info_error", file_id=file_id, error=str(e))
             return None
 
-    async def download_file(self, url: str) -> Optional[bytes]:
-        """Download file from Slack"""
+    async def download_file(self, url: str, bot_token: Optional[str] = None) -> Optional[bytes]:
+        """
+        Download file from Slack.
+
+        Args:
+            url: The file URL to download
+            bot_token: Optional workspace-specific bot token (for multi-tenancy)
+
+        NOTE: Public permalinks don't require authentication.
+        Private URLs require bot token but may still have auth issues.
+        """
         try:
             import httpx
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    url,
-                    headers={"Authorization": f"Bearer {settings.slack_bot_token}"}
+
+            # Use provided token or fall back to default
+            token = bot_token or settings.slack_bot_token
+
+            # Check if this is a public permalink (doesn't need auth)
+            is_public = "slack.com/files-pri-pub/" in url or "/public/" in url
+
+            logger.info(
+                "attempting_file_download",
+                url=url[:150],
+                is_public_url=is_public,
+                has_bot_token=bool(token),
+                using_workspace_token=bool(bot_token)
+            )
+
+            # Build headers - only add auth for private URLs
+            headers = {}
+            if not is_public:
+                headers["Authorization"] = f"Bearer {token}"
+
+            # Follow all redirects automatically
+            async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+                response = await client.get(url, headers=headers)
+
+                logger.info(
+                    "download_response",
+                    status_code=response.status_code,
+                    content_type=response.headers.get("content-type", ""),
+                    final_url=str(response.url)[:150]
                 )
+
                 response.raise_for_status()
-                return response.content
+
+                # Validate that we got actual file content, not HTML
+                content = response.content
+                content_type = response.headers.get("content-type", "").lower()
+
+                # Check if we accidentally got an HTML page instead of the file
+                # Only reject if:
+                # 1. Content looks like HTML
+                # 2. BUT the URL doesn't indicate it should be an HTML file
+                is_html_content = content.startswith(b'<!DOCTYPE') or content.startswith(b'<!doctype') or content.startswith(b'<html')
+                is_html_file = url.lower().endswith('.html') or url.lower().endswith('.htm')
+
+                if is_html_content and not is_html_file:
+                    logger.error(
+                        "received_html_instead_of_file",
+                        url=url[:100],
+                        content_type=content_type,
+                        content_preview=content[:100]
+                    )
+                    return None
+
+                logger.info(
+                    "file_downloaded_successfully",
+                    url=url[:100],
+                    content_type=content_type,
+                    size_bytes=len(content)
+                )
+
+                return content
+
         except Exception as e:
-            logger.error("file_download_error", url=url, error=str(e))
+            logger.error("file_download_error", url=url[:100], error=str(e))
             return None
 
     async def post_message(
@@ -167,11 +248,23 @@ class SlackClientManager:
         channel: str,
         text: str = None,
         blocks: List[Dict[str, Any]] = None,
-        thread_ts: str = None
+        thread_ts: str = None,
+        bot_token: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """Post a message to a channel or thread"""
+        """Post a message to a channel or thread
+
+        Args:
+            channel: Channel ID
+            text: Message text
+            blocks: Message blocks
+            thread_ts: Thread timestamp
+            bot_token: Optional workspace-specific bot token (for multi-tenancy)
+        """
         try:
-            response = self.client.chat_postMessage(
+            # Use workspace-specific token if provided, otherwise use global client
+            client = WebClient(token=bot_token) if bot_token else self.client
+
+            response = client.chat_postMessage(
                 channel=channel,
                 text=text,
                 blocks=blocks,
@@ -181,7 +274,8 @@ class SlackClientManager:
                 "message_posted",
                 channel=channel,
                 thread_ts=thread_ts,
-                ts=response["ts"]
+                ts=response["ts"],
+                using_workspace_token=bool(bot_token)
             )
             return response.data
         except SlackApiError as e:
@@ -213,16 +307,27 @@ class SlackClientManager:
         self,
         channel: str,
         timestamp: str,
-        reaction: str
+        reaction: str,
+        bot_token: Optional[str] = None
     ) -> bool:
-        """Add a reaction to a message"""
+        """Add a reaction to a message
+
+        Args:
+            channel: Channel ID
+            timestamp: Message timestamp
+            reaction: Reaction name (without colons)
+            bot_token: Optional workspace-specific bot token (for multi-tenancy)
+        """
         try:
-            self.client.reactions_add(
+            # Use workspace-specific token if provided, otherwise use global client
+            client = WebClient(token=bot_token) if bot_token else self.client
+
+            client.reactions_add(
                 channel=channel,
                 timestamp=timestamp,
                 name=reaction
             )
-            logger.info("reaction_added", channel=channel, ts=timestamp, reaction=reaction)
+            logger.info("reaction_added", channel=channel, ts=timestamp, reaction=reaction, using_workspace_token=bool(bot_token))
             return True
         except SlackApiError as e:
             logger.error("add_reaction_error", channel=channel, ts=timestamp, error=str(e))
@@ -232,16 +337,27 @@ class SlackClientManager:
         self,
         channel: str,
         timestamp: str,
-        reaction: str
+        reaction: str,
+        bot_token: Optional[str] = None
     ) -> bool:
-        """Remove a reaction from a message"""
+        """Remove a reaction from a message
+
+        Args:
+            channel: Channel ID
+            timestamp: Message timestamp
+            reaction: Reaction name (without colons)
+            bot_token: Optional workspace-specific bot token (for multi-tenancy)
+        """
         try:
-            self.client.reactions_remove(
+            # Use workspace-specific token if provided, otherwise use global client
+            client = WebClient(token=bot_token) if bot_token else self.client
+
+            client.reactions_remove(
                 channel=channel,
                 timestamp=timestamp,
                 name=reaction
             )
-            logger.info("reaction_removed", channel=channel, ts=timestamp, reaction=reaction)
+            logger.info("reaction_removed", channel=channel, ts=timestamp, reaction=reaction, using_workspace_token=bool(bot_token))
             return True
         except SlackApiError as e:
             logger.error("remove_reaction_error", channel=channel, ts=timestamp, error=str(e))
@@ -252,17 +368,29 @@ class SlackClientManager:
         channel: str,
         timestamp: str,
         text: str = None,
-        blocks: List[Dict[str, Any]] = None
+        blocks: List[Dict[str, Any]] = None,
+        bot_token: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """Update an existing message"""
+        """Update an existing message
+
+        Args:
+            channel: Channel ID
+            timestamp: Message timestamp
+            text: New message text
+            blocks: New message blocks
+            bot_token: Optional workspace-specific bot token (for multi-tenancy)
+        """
         try:
-            response = self.client.chat_update(
+            # Use workspace-specific token if provided, otherwise use global client
+            client = WebClient(token=bot_token) if bot_token else self.client
+
+            response = client.chat_update(
                 channel=channel,
                 ts=timestamp,
                 text=text,
                 blocks=blocks
             )
-            logger.info("message_updated", channel=channel, ts=timestamp)
+            logger.info("message_updated", channel=channel, ts=timestamp, using_workspace_token=bool(bot_token))
             return response.data
         except SlackApiError as e:
             logger.error("update_message_error", channel=channel, ts=timestamp, error=str(e))

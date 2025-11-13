@@ -1,4 +1,6 @@
 """Bot interaction orchestration service"""
+import asyncio
+import uuid
 from typing import Dict, Any, Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.slack_client import slack_client_manager
@@ -9,18 +11,40 @@ from app.services.query_service import query_service
 from app.services.query_rewriter import query_rewriter
 from app.services.llm_service import llm_service
 from app.services.conversation_service import conversation_service
+from app.services.conversation_context_service import get_conversation_context_service
 from app.services.context_service import context_service
 from app.services.prompt_service import prompt_service
 from app.services.citation_service import citation_service
+from app.services.intelligent_query_service import intelligent_query_service
+from app.services.graph_enhanced_retrieval import get_graph_enhanced_retrieval
+from app.services.workspace_service import workspace_service
 from app.core.logging import get_logger
 from app.core.monitoring import retrieval_no_results, retrieval_low_confidence
-import uuid
+from app.core.config import settings
 
 logger = get_logger(__name__)
 
 
 class BotInteractionService:
     """Orchestrates bot interactions and responses"""
+
+    # Thinking messages that rotate while processing (no emojis)
+    THINKING_MESSAGES = [
+        "Thinking...",
+        "Searching your workspace...",
+        "Analyzing messages...",
+        "Finding relevant discussions...",
+        "Processing your request...",
+        "Looking through your data...",
+        "Gathering context...",
+        "Reviewing conversations...",
+        "Preparing your answer..."
+    ]
+
+    def _get_random_thinking_message(self) -> str:
+        """Get a random thinking message"""
+        import random
+        return random.choice(self.THINKING_MESSAGES)
 
     def _merge_retrieval_results(
         self,
@@ -141,12 +165,31 @@ class BotInteractionService:
             # Generate query_id for feedback tracking
             query_id = str(uuid.uuid4())
 
-            # Add eyes reaction to show bot is processing
-            await slack_client_manager.add_reaction(
+            # Step 0: Get user's team_id and workspace token FIRST (needed for posting messages)
+            from app.models.user import User
+            from sqlalchemy import select as sql_select
+
+            user_stmt = sql_select(User).where(User.user_id == user_id)
+            user_result = await db.execute(user_stmt)
+            user = user_result.scalar_one_or_none()
+            team_id = user.team_id if user else None
+
+            if not team_id:
+                logger.error("user_team_id_not_found", user_id=user_id)
+                raise ValueError(f"Could not find team_id for user {user_id}")
+
+            # Get workspace token for posting messages
+            workspace_token = await workspace_service.get_workspace_token(team_id, db)
+
+            # Post initial thinking message with workspace token
+            thinking_message = self._get_random_thinking_message()
+            thinking_response = await slack_client_manager.post_message(
                 channel=channel,
-                timestamp=thread_ts,
-                reaction="eyes"
+                text=thinking_message,
+                thread_ts=thread_ts,
+                bot_token=workspace_token
             )
+            thinking_ts = thinking_response.get("ts") if thinking_response else None
 
             # Step 1: Get or create conversation based on thread
             # Always use thread-based conversations to maintain context across slash commands and messages
@@ -164,14 +207,86 @@ class BotInteractionService:
                     db=db
                 )
 
-            # Step 2: Rewrite query with conversation context
+            # Step 2a: Check if bot is ready to answer queries (team_id already fetched in Step 0)
+            from app.services.bot_readiness_service import get_bot_readiness_service
+            readiness_service = get_bot_readiness_service(db)
+            is_ready = await readiness_service.is_bot_ready(team_id)
+
+            if not is_ready:
+                # Bot not ready - update thinking message with status
+                not_ready_message = await readiness_service.get_not_ready_message(team_id)
+
+                # Update thinking message with bot not ready status
+                if thinking_ts:
+                    await slack_client_manager.update_message(
+                        channel=channel,
+                        timestamp=thinking_ts,
+                        text=not_ready_message,
+                        bot_token=workspace_token
+                    )
+                else:
+                    # Fallback: post new message if thinking message failed
+                    await slack_client_manager.post_message(
+                        channel=channel,
+                        text=not_ready_message,
+                        thread_ts=thread_ts
+                    )
+
+                logger.info(
+                    "query_blocked_bot_not_ready",
+                    team_id=team_id,
+                    user_id=user_id,
+                    query=query
+                )
+
+                return False  # Query not processed
+
+            # Step 2b: Expand query with team-specific vocabulary
+            # Automatically expands abbreviations: "k8s" -> "kubernetes", "FE" -> "frontend"
+            from app.services.team_vocabulary_service import get_team_vocabulary_service
+            vocab_service = get_team_vocabulary_service(db)
+            vocab_expansion = await vocab_service.expand_query(team_id, query)
+
+            if vocab_expansion['expansions']:
+                logger.info(
+                    "query_expanded_with_vocabulary",
+                    original=query,
+                    expanded=vocab_expansion['expanded_query'],
+                    expansions=[e['term'] for e in vocab_expansion['expansions']]
+                )
+                query = vocab_expansion['expanded_query']  # Use expanded query
+
+            # Step 2c: Track conversation context with structured entity tracking
+            context_service_instance = get_conversation_context_service(db)
+            context_conversation = await context_service_instance.get_or_create_conversation(
+                user_id=user_id,
+                team_id=team_id,
+                channel_id=channel
+            )
+
+            # Step 2d: Apply entity-based context rewriting (fast, rule-based)
+            context_rewrite_result = await context_service_instance.rewrite_query_with_context(
+                query=query,
+                conversation_id=str(context_conversation.id)
+            )
+
+            # Step 2e: Rewrite query with LLM-based conversation context (slower, more sophisticated)
             original_query = query
             rewritten_query = await query_rewriter.rewrite_query(
-                query=query,
+                query=context_rewrite_result['rewritten_query'],  # Use entity-enhanced query
                 conversation_id=conversation_id,
                 db=db
             )
             query_was_rewritten = (rewritten_query != original_query)
+
+            if query_was_rewritten:
+                logger.info(
+                    "query_rewritten",
+                    original=original_query,
+                    entity_rewrite=context_rewrite_result['rewritten_query'],
+                    final_rewrite=rewritten_query,
+                    context_entities=context_rewrite_result.get('context_entities', [])
+                )
 
             # Refresh conversation after rewriting
             if not conversation:
@@ -179,74 +294,69 @@ class BotInteractionService:
                     conversation_id, db
                 )
 
-            # Step 3: Get user's team_id for permission filtering
-            from app.models.user import User
-            from sqlalchemy import select as sql_select
-
-            user_stmt = sql_select(User).where(User.user_id == user_id)
-            user_result = await db.execute(user_stmt)
-            user = user_result.scalar_one_or_none()
-            team_id = user.team_id if user else None
-
-            if not team_id:
-                logger.error("user_team_id_not_found", user_id=user_id)
-                raise ValueError(f"Could not find team_id for user {user_id}")
-
-            # Step 4: Analyze rewritten query
+            # Step 3: Analyze rewritten query
             analysis = await query_service.analyze_query(rewritten_query)
 
-            # Step 5: Hybrid retrieval - search both Slack and cross-source knowledge graph
-            # Run both retrieval methods in parallel for better performance
+            # Step 3b: Add query to context for future queries
+            await context_service_instance.add_query_to_context(
+                conversation_id=str(context_conversation.id),
+                query=original_query,
+                query_analysis=analysis
+            )
+
+            # Step 5: INTELLIGENT RETRIEVAL with all advanced features
+            # Uses: Query Decomposition, Learned Rewrites, Graph-Enhanced Retrieval
             try:
-                # Traditional Slack-only retrieval (fast, proven)
-                slack_retrieval_task = retrieval_service.retrieve(
-                    query=rewritten_query,
-                    query_analysis=analysis,
-                    user_id=user_id,
-                    team_id=team_id,
-                    db=db,
-                    top_k=10
-                )
+                # Check if intelligent query service is enabled
+                use_intelligent_service = getattr(settings, 'enable_intelligent_query', True)
 
-                # Cross-source retrieval with ENTITY-AWARE SEARCH
-                # This uses the unified knowledge graph to automatically find content
-                # about entities across ALL sources (Slack, GitHub, etc.)
-                cross_source_service = get_cross_source_retrieval_service()
-                cross_source_task = cross_source_service.entity_aware_search(
-                    query=rewritten_query,
-                    team_id=team_id,
-                    db=db,
-                    sources=["slack", "github"],  # Search both sources
-                    top_k=10
-                )
+                if use_intelligent_service:
+                    # Use intelligent query service with all advanced features:
+                    # - Query decomposition for complex queries
+                    # - Learned rewrites from user feedback
+                    # - Graph-enhanced retrieval for entity connections
+                    # - Cross-source search
+                    logger.info("using_intelligent_query_service", query=rewritten_query)
 
-                # Await both tasks
-                import asyncio
-                slack_results, cross_source_data = await asyncio.gather(
-                    slack_retrieval_task,
-                    cross_source_task,
-                    return_exceptions=True
-                )
+                    intelligent_result = await intelligent_query_service.process_query(
+                        query=rewritten_query,
+                        user_id=user_id,
+                        team_id=team_id,
+                        conversation_id=conversation_id,
+                        db=db
+                    )
 
-                # Handle exceptions gracefully
-                if isinstance(slack_results, Exception):
-                    logger.error("slack_retrieval_failed", error=str(slack_results))
-                    slack_results = []
+                    retrieval_results = intelligent_result['results']
+                    processing_metadata = intelligent_result.get('metadata', {})
 
-                if isinstance(cross_source_data, Exception):
-                    logger.error("cross_source_retrieval_failed", error=str(cross_source_data))
-                    cross_source_data = {'results': [], 'stats': {}}
+                    # Log what the intelligent service did
+                    if processing_metadata:
+                        logger.info(
+                            "intelligent_query_metadata",
+                            was_rewritten=processing_metadata.get('was_rewritten', False),
+                            was_decomposed=processing_metadata.get('was_decomposed', False),
+                            steps=len(processing_metadata.get('steps', []))
+                        )
 
-                # Merge and deduplicate results
-                retrieval_results = self._merge_retrieval_results(slack_results, cross_source_data)
+                else:
+                    # Simple retrieval: PROVEN, WORKING retrieval service
+                    # Queries Message table directly - no cross-source complexity
+                    logger.info("using_simple_retrieval", query=rewritten_query)
 
-                logger.info(
-                    "hybrid_retrieval_completed",
-                    slack_count=len(slack_results) if not isinstance(slack_results, Exception) else 0,
-                    cross_source_count=len(cross_source_data.get('results', [])),
-                    merged_count=len(retrieval_results),
-                    graph_expanded=cross_source_data.get('stats', {}).get('expanded_nodes', 0)
-                )
+                    # Use proven retrieval service that directly queries Message table
+                    retrieval_results = await retrieval_service.retrieve(
+                        query=rewritten_query,
+                        query_analysis=analysis,
+                        user_id=user_id,
+                        team_id=team_id,
+                        db=db,
+                        top_k=15  # Get more results since we're not merging sources
+                    )
+
+                    logger.info(
+                        "simple_retrieval_completed",
+                        results_count=len(retrieval_results)
+                    )
 
             except Exception as e:
                 logger.error("hybrid_retrieval_error", error=str(e))
@@ -351,13 +461,25 @@ class BotInteractionService:
                 query_id=query_id
             )
 
-            # Step 10: Post response
-            await slack_client_manager.post_message(
-                channel=channel,
-                text=formatted_response["text"],
-                blocks=formatted_response["blocks"],
-                thread_ts=thread_ts
-            )
+            # Step 10: Post response (using workspace-specific token fetched in Step 0)
+            # Update the thinking message with the actual response
+            if thinking_ts:
+                await slack_client_manager.update_message(
+                    channel=channel,
+                    timestamp=thinking_ts,
+                    text=formatted_response["text"],
+                    blocks=formatted_response["blocks"],
+                    bot_token=workspace_token
+                )
+            else:
+                # Fallback: post new message if thinking message failed
+                await slack_client_manager.post_message(
+                    channel=channel,
+                    text=formatted_response["text"],
+                    blocks=formatted_response["blocks"],
+                    thread_ts=thread_ts,
+                    bot_token=workspace_token
+                )
 
             # Step 11: Log query with enhanced metadata (team_id already fetched in Step 3)
             await self._log_query(
@@ -381,21 +503,34 @@ class BotInteractionService:
                 conversation_id=conversation_id,
                 query_id=query_id
             )
+
             return True
 
         except Exception as e:
             logger.error("handle_ask_error", error=str(e), user_id=user_id)
 
-            # Post error message
+            # Update thinking message with error
             error_response = response_formatter.format_error_message(
                 "Sorry, I encountered an error while processing your request. Please try again."
             )
-            await slack_client_manager.post_message(
-                channel=channel,
-                text=error_response["text"],
-                blocks=error_response["blocks"],
-                thread_ts=thread_ts
-            )
+
+            if thinking_ts:
+                await slack_client_manager.update_message(
+                    channel=channel,
+                    timestamp=thinking_ts,
+                    text=error_response["text"],
+                    blocks=error_response["blocks"],
+                    bot_token=workspace_token
+                )
+            else:
+                # Fallback: post new message if thinking message failed
+                await slack_client_manager.post_message(
+                    channel=channel,
+                    text=error_response["text"],
+                    blocks=error_response["blocks"],
+                    thread_ts=thread_ts
+                )
+
             return False
 
     async def handle_find_query(
@@ -408,14 +543,7 @@ class BotInteractionService:
     ) -> bool:
         """Handle find query - search and return results"""
         try:
-            # Add eyes reaction to show bot is processing
-            await slack_client_manager.add_reaction(
-                channel=channel,
-                timestamp=thread_ts,
-                reaction="eyes"
-            )
-
-            # Step 1: Get user's team_id for permission filtering
+            # Step 1: Get user's team_id and workspace token FIRST
             from app.models.user import User
             from sqlalchemy import select as sql_select
 
@@ -428,7 +556,20 @@ class BotInteractionService:
                 logger.error("user_team_id_not_found", user_id=user_id)
                 raise ValueError(f"Could not find team_id for user {user_id}")
 
-            # Step 2: Analyze query
+            # Get workspace token for posting messages
+            workspace_token = await workspace_service.get_workspace_token(team_id, db)
+
+            # Post initial thinking message with workspace token
+            thinking_message = self._get_random_thinking_message()
+            thinking_response = await slack_client_manager.post_message(
+                channel=channel,
+                text=thinking_message,
+                thread_ts=thread_ts,
+                bot_token=workspace_token
+            )
+            thinking_ts = thinking_response.get("ts") if thinking_response else None
+
+            # Step 2: Analyze query (team_id already fetched in Step 1)
             analysis = await query_service.analyze_query(query)
 
             # Step 3: Retrieve relevant results WITH PERMISSION FILTERING
@@ -447,13 +588,23 @@ class BotInteractionService:
                 query=query
             )
 
-            # Step 4: Post response
-            await slack_client_manager.post_message(
-                channel=channel,
-                text=formatted_response["text"],
-                blocks=formatted_response["blocks"],
-                thread_ts=thread_ts
-            )
+            # Step 4: Update thinking message with results
+            if thinking_ts:
+                await slack_client_manager.update_message(
+                    channel=channel,
+                    timestamp=thinking_ts,
+                    text=formatted_response["text"],
+                    blocks=formatted_response["blocks"],
+                    bot_token=workspace_token
+                )
+            else:
+                # Fallback: post new message if thinking message failed
+                await slack_client_manager.post_message(
+                    channel=channel,
+                    text=formatted_response["text"],
+                    blocks=formatted_response["blocks"],
+                    thread_ts=thread_ts
+                )
 
             logger.info(
                 "find_query_handled",
@@ -461,21 +612,34 @@ class BotInteractionService:
                 channel=channel,
                 result_count=len(results)
             )
+
             return True
 
         except Exception as e:
             logger.error("handle_find_error", error=str(e), user_id=user_id)
 
-            # Post error message
+            # Update thinking message with error
             error_response = response_formatter.format_error_message(
                 "Sorry, I encountered an error while searching. Please try again."
             )
-            await slack_client_manager.post_message(
-                channel=channel,
-                text=error_response["text"],
-                blocks=error_response["blocks"],
-                thread_ts=thread_ts
-            )
+
+            if thinking_ts:
+                await slack_client_manager.update_message(
+                    channel=channel,
+                    timestamp=thinking_ts,
+                    text=error_response["text"],
+                    blocks=error_response["blocks"],
+                    bot_token=workspace_token
+                )
+            else:
+                # Fallback: post new message if thinking message failed
+                await slack_client_manager.post_message(
+                    channel=channel,
+                    text=error_response["text"],
+                    blocks=error_response["blocks"],
+                    thread_ts=thread_ts
+                )
+
             return False
 
     async def handle_message_event(

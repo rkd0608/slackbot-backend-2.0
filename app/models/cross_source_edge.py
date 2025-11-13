@@ -109,14 +109,21 @@ class CrossSourceEdge(Base):
         nullable=False,
         index=True
     )
-    edge_type = Column(SQLEnum(EdgeType), nullable=False, index=True)
+    edge_type = Column(
+        SQLEnum(EdgeType, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        index=True
+    )
 
     # Context
     team_id = Column(String(100), nullable=False, index=True)
 
     # Confidence and evidence
     confidence = Column(Float, default=1.0, nullable=False)  # 0.0 to 1.0
-    detection_method = Column(SQLEnum(DetectionMethod), nullable=False)
+    detection_method = Column(
+        SQLEnum(DetectionMethod, values_callable=lambda x: [e.value for e in x]),
+        nullable=False
+    )
     evidence = Column(String(2000), nullable=True)  # Why this relationship exists
     link_text = Column(String(1000), nullable=True)  # Actual text/URL that created link
 

@@ -419,7 +419,33 @@ class CodeDetector:
         - Programming operators: =, ==, !=, +=, ->, =>
         - Brackets/parentheses: (), [], {}
         - Common programming symbols: ; : . ->
+        - CLI commands: npm, docker, git, ngrok, curl, etc.
+        - Shell patterns: flags (--flag, -f), pipes (|), redirects (>)
         """
+        # Common CLI tools and commands
+        cli_commands = [
+            r'\b(npm|yarn|pnpm)\s+(install|run|start|build|test)',
+            r'\b(docker|kubectl|helm)\s+\w+',
+            r'\b(git)\s+(clone|pull|push|commit|checkout|add|status)',
+            r'\b(ngrok)\s+(http|tcp|tls)',
+            r'\b(curl|wget)\s+',
+            r'\b(pip|poetry|pipenv)\s+(install|uninstall)',
+            r'\b(python|node|go|rust|java)\s+',
+            r'\b(aws|gcloud|az)\s+',
+            r'\b(mysql|psql|redis-cli)\s+',
+            r'\b(uvicorn|gunicorn|flask|fastapi)\s+',
+        ]
+
+        # Shell/CLI patterns
+        shell_patterns = [
+            r'--[\w-]+',  # Long flags: --flag-name
+            r'\s-[a-zA-Z](\s|$)',  # Short flags: -f
+            r'\|\s*\w+',  # Pipes: | grep
+            r'>\s*\w+',  # Redirects: > file.txt
+            r'&&|\|\|',  # Command chaining
+        ]
+
+        # Programming patterns
         code_indicators = [
             r'[=!<>]=',  # ==, !=, <=, >=
             r'[+\-*/%]=',  # +=, -=, etc.
@@ -431,7 +457,10 @@ class CodeDetector:
             r'^\s*\w+:',  # Key-value pairs
         ]
 
-        for pattern in code_indicators:
+        # Check all pattern types
+        all_patterns = cli_commands + shell_patterns + code_indicators
+
+        for pattern in all_patterns:
             if re.search(pattern, text):
                 return True
 

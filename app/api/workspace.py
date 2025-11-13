@@ -88,14 +88,18 @@ class DeleteWorkspaceResponse(BaseModel):
 async def get_workspace_channels(
     team_id: str,
     include_archived: bool = Query(False, description="Include archived channels"),
-    types: str = Query("public,private", description="Channel types (comma-separated)"),
+    types: str = Query("public,private,dm,group", description="Conversation types: public,private,dm,group"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Get list of all channels in workspace for selection
+    Get list of all conversations in workspace for selection (Glean-style)
 
-    Returns channel list with indexing status for channel selection UI
+    Returns all conversation types:
+    - public: Public channels
+    - private: Private channels
+    - dm: Direct messages
+    - group: Group messages (MPIMs)
     """
 
     try:
@@ -140,8 +144,16 @@ async def get_workspace_channels(
         for slack_channel in channels_data:
             channel_id = slack_channel["id"]
             is_private = slack_channel.get("is_private", False)
+            is_dm = slack_channel.get("is_im", False) or channel_id.startswith("D")
 
-            if is_private:
+            # Determine channel name (handle DMs which don't have 'name' field)
+            if is_dm:
+                user_id = slack_channel.get("user", "unknown")
+                channel_name = f"DM with {user_id}"
+            else:
+                channel_name = slack_channel.get("name", f"unknown-{channel_id}")
+
+            if is_private or is_dm:
                 private_count += 1
             else:
                 public_count += 1
@@ -151,12 +163,12 @@ async def get_workspace_channels(
 
             channels.append(ChannelInfo(
                 channel_id=channel_id,
-                name=slack_channel["name"],
-                is_private=is_private,
+                name=channel_name,
+                is_private=is_private or is_dm,
                 is_archived=slack_channel.get("is_archived", False),
                 member_count=slack_channel.get("num_members", 0),
-                topic=slack_channel.get("topic", {}).get("value"),
-                purpose=slack_channel.get("purpose", {}).get("value"),
+                topic=slack_channel.get("topic", {}).get("value") if not is_dm else None,
+                purpose=slack_channel.get("purpose", {}).get("value") if not is_dm else None,
                 is_member=slack_channel.get("is_member", True),
                 indexing_enabled=db_channel.indexing_enabled if db_channel else True,
                 indexing_status=db_channel.indexing_status if db_channel else "pending"
@@ -420,12 +432,16 @@ async def get_workspace_status(
 async def _fetch_slack_channels(
     bot_token: str,
     include_archived: bool = False,
-    types: str = "public_channel,private_channel"
+    types: str = "public_channel,private_channel,im,mpim"
 ) -> List[dict]:
     """
-    Fetch channels from Slack API
+    Fetch conversations from Slack API (Glean-style)
 
-    Helper function to get channel list from Slack
+    Supports all conversation types:
+    - public_channel: Public channels
+    - private_channel: Private channels
+    - im: Direct messages
+    - mpim: Multi-party instant messages (group DMs)
     """
 
     channels = []
@@ -434,8 +450,15 @@ async def _fetch_slack_channels(
         cursor = None
 
         while True:
+            # Convert short types to Slack API format
+            slack_types = (types
+                .replace("public", "public_channel")
+                .replace("private", "private_channel")
+                .replace("dm", "im")
+                .replace("group", "mpim"))
+
             params = {
-                "types": types.replace("public", "public_channel").replace("private", "private_channel"),
+                "types": slack_types,
                 "exclude_archived": not include_archived,
                 "limit": 200
             }

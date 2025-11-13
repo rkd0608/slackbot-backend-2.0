@@ -106,8 +106,8 @@ class RetrievalService:
         else:
             final_results = candidates[:top_k]
 
-        # Stage 4: Hydrate results with human-readable names
-        hydrated_results = await self._hydrate_results(final_results, db)
+        # Stage 4: Hydrate results with human-readable names (SECURITY: pass team_id for validation)
+        hydrated_results = await self._hydrate_results(final_results, db, team_id)
 
         # Stage 5: ALWAYS filter by user permissions (SECURITY CRITICAL)
         from app.services.permission_service import permission_service
@@ -436,9 +436,10 @@ class RetrievalService:
             if temporal and temporal.get("end_date"):
                 query_filters.append(Message.timestamp <= temporal["end_date"])
 
-            # Code filter
-            if query_analysis.get("has_code_intent"):
-                query_filters.append(Message.has_code == True)
+            # Code filter: REMOVED hard filter (same as vector search fix)
+            # Using has_code as ranking signal via importance_score instead
+            # if query_analysis.get("has_code_intent"):
+            #     query_filters.append(Message.has_code == True)
 
             # Execute query
             result = await db.execute(
@@ -501,7 +502,7 @@ class RetrievalService:
             entity_texts = [e["text"] for e in entities]
 
             # ENHANCEMENT: Expand entity search using knowledge graph
-            expanded_entities = await self._expand_entities_with_graph(entity_texts, db)
+            expanded_entities = await self._expand_entities_with_graph(entity_texts, db, team_id)
             all_entity_texts = list(set(entity_texts + expanded_entities))
 
             logger.info(
@@ -1207,9 +1208,10 @@ class RetrievalService:
                 else:
                     filters["timestamp"] = {"$lte": temporal["end_date"].timestamp()}
 
-        # Code filter
-        if query_analysis.get("has_code_intent"):
-            filters["has_code"] = True
+        # Code filter: REMOVED hard filter, using has_code as ranking signal only
+        # The scoring function at line 1058 already boosts messages with has_code=True
+        # This allows finding messages about code/commands even without backticks
+        # Example: "ngrok http 8000" isn't in backticks but is still relevant for "ngrok command" query
 
         return filters  # Always returns a dict with at least team_id
 
@@ -1252,9 +1254,13 @@ class RetrievalService:
     async def _hydrate_results(
         self,
         results: List[Dict[str, Any]],
-        db: AsyncSession
+        db: AsyncSession,
+        team_id: str
     ) -> List[Dict[str, Any]]:
-        """Hydrate results with message, file, and GitHub code data"""
+        """Hydrate results with message, file, and GitHub code data
+
+        SECURITY: team_id is REQUIRED for defense-in-depth validation
+        """
         from sqlalchemy import select
         from app.models.message import Message
         from app.models.file import File
@@ -1263,21 +1269,42 @@ class RetrievalService:
         message_ids = [r.get("message_id") for r in results if r.get("message_id")]
         file_ids = [r.get("file_id") for r in results if r.get("file_id")]
 
-        # Fetch messages from database
+        # Fetch messages from database (SECURITY: filter by team_id)
         message_map = {}
         if message_ids:
-            stmt = select(Message).where(Message.message_id.in_(message_ids))
+            stmt = select(Message).where(
+                and_(
+                    Message.message_id.in_(message_ids),
+                    Message.team_id == team_id  # CRITICAL: Prevent cross-team data access
+                )
+            )
             result = await db.execute(stmt)
             messages_db = result.scalars().all()
             message_map = {msg.message_id: msg for msg in messages_db}
 
-        # Fetch files from database
+        # Fetch files from database (SECURITY: filter by team_id for defense-in-depth)
         file_map = {}
         if file_ids:
-            stmt = select(File).where(File.file_id.in_(file_ids))
+            stmt = select(File).where(
+                and_(
+                    File.file_id.in_(file_ids),
+                    File.team_id == team_id  # CRITICAL: Defense-in-depth - validate team ownership
+                )
+            )
             result = await db.execute(stmt)
             files_db = result.scalars().all()
             file_map = {file.file_id: file for file in files_db}
+
+            # Log if any file_ids were filtered out (indicates a security issue upstream)
+            if len(file_map) < len(file_ids):
+                filtered_count = len(file_ids) - len(file_map)
+                logger.warning(
+                    "cross_team_file_ids_filtered",
+                    requested_count=len(file_ids),
+                    returned_count=len(file_map),
+                    filtered_count=filtered_count,
+                    team_id=team_id
+                )
 
         # Hydrate results
         hydrated = []

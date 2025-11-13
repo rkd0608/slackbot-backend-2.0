@@ -43,7 +43,33 @@ async def process_ask_command(query: str, user_id: str, team_id: str, channel_id
                 )
                 break
 
-            # Post initial message to create thread
+            # Check if this is an Assistant chat (DM channel)
+            is_assistant_chat = channel_id.startswith('D')
+
+            if is_assistant_chat:
+                # In Assistant chat, slash commands are not needed
+                # Users should type naturally in the Chat tab
+                await slack_client_manager.post_message(
+                    channel=channel_id,
+                    text=(
+                        "💡 *Tip: Using the Chat Tab*\n\n"
+                        "In the Chat tab, you don't need to use `/ask` - just type your question naturally and I'll respond!\n\n"
+                        "Example:\n"
+                        "✅ _\"How do we deploy to production?\"_\n"
+                        "❌ _\"/ask How do we deploy to production?\"_\n\n"
+                        "Slash commands work great in regular channels like #engineering, but here in Chat, "
+                        "we can have a natural conversation like you would with ChatGPT or Claude."
+                    )
+                )
+                logger.info(
+                    "slash_command_in_assistant_chat_blocked",
+                    channel_id=channel_id,
+                    user_id=user_id,
+                    command="ask"
+                )
+                break
+
+            # For regular channels, post initial message to create thread
             initial_msg = await slack_client_manager.post_message(
                 channel=channel_id,
                 text=f"Question: {query}"
@@ -119,7 +145,31 @@ async def process_find_command(query: str, user_id: str, team_id: str, channel_i
     from app.core.database import db_manager
 
     try:
-        # Post initial message to create thread
+        # Check if this is an Assistant chat (DM channel)
+        is_assistant_chat = channel_id.startswith('D')
+
+        if is_assistant_chat:
+            # In Assistant chat, slash commands are not needed
+            await slack_client_manager.post_message(
+                channel=channel_id,
+                text=(
+                    "💡 *Tip: Using the Chat Tab*\n\n"
+                    "In the Chat tab, you don't need to use `/find` - just ask me naturally and I'll search for you!\n\n"
+                    "Example:\n"
+                    "✅ _\"Find messages about deployment process\"_\n"
+                    "❌ _\"/find deployment process\"_\n\n"
+                    "I'll understand what you're looking for from the context of our conversation."
+                )
+            )
+            logger.info(
+                "slash_command_in_assistant_chat_blocked",
+                channel_id=channel_id,
+                user_id=user_id,
+                command="find"
+            )
+            return
+
+        # For regular channels, post initial message to create thread
         initial_msg = await slack_client_manager.post_message(
             channel=channel_id,
             text=f"Search: {query}"

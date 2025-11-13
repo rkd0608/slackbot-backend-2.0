@@ -1,17 +1,21 @@
 """Admin endpoints for backfill and sync operations"""
-from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
+from typing import Dict, Any, Optional
+from app.core.database import db_manager, get_db
+from app.models.file import File
+from app.models.workspace import Workspace
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete
-from app.core.database import get_db
-from app.services.backfill_service import backfill_service
-from app.services.sync_service import sync_service
-from app.services.event_buffer_service import event_buffer_service
-from app.core.queue import queue_manager
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.workers.backfill_worker import backfill_worker
+
 from app.core.logging import get_logger
+from app.core.queue import queue_manager
 from app.models.event_buffer import EventBuffer, EventBufferStatus
 from app.models.processed_event import ProcessedEvent
+from app.services.backfill_service import backfill_service
+from app.services.event_buffer_service import event_buffer_service
+from app.services.sync_service import sync_service
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -35,7 +39,7 @@ async def backfill_channel(
             )
             logger.info("channel_backfill_completed", channel_id=channel_id, count=count)
 
-    from app.core.database import db_manager
+
     background_tasks.add_task(run_backfill)
 
     return {
@@ -53,7 +57,7 @@ async def backfill_all_channels(
     """Trigger backfill for all channels"""
 
     async def run_backfill():
-        from app.workers.backfill_worker import backfill_worker
+
         await backfill_worker.run_full_backfill(limit_per_channel)
 
     background_tasks.add_task(run_backfill)
@@ -71,7 +75,6 @@ async def resume_backfill(
     """Resume interrupted backfills"""
 
     async def run_resume():
-        from app.workers.backfill_worker import backfill_worker
         await backfill_worker.resume_backfill()
 
     background_tasks.add_task(run_resume)
@@ -91,7 +94,7 @@ async def sync_channels(
             count = await sync_service.sync_all_channels(session)
             logger.info("channels_sync_completed", count=count)
 
-    from app.core.database import db_manager
+
     background_tasks.add_task(run_sync)
 
     return {"status": "started"}
@@ -148,7 +151,6 @@ async def system_health(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
         buffer_stats = await event_buffer_service.get_buffer_stats()
 
         # Get processed events count (last 24h)
-        from datetime import datetime, timedelta
         cutoff = datetime.utcnow() - timedelta(hours=24)
         processed_count_stmt = select(func.count(ProcessedEvent.event_id)).where(
             ProcessedEvent.processed_at >= cutoff
@@ -374,8 +376,6 @@ async def cleanup_old_buffered_events(
 ) -> Dict[str, Any]:
     """Clean up old queued/failed buffered events"""
     try:
-        from datetime import datetime, timedelta
-        from sqlalchemy import delete
 
         cutoff_date = datetime.utcnow() - timedelta(days=days)
 
@@ -406,7 +406,6 @@ async def cleanup_old_buffered_events(
 async def get_processed_events_stats(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
     """Get statistics about processed events (for deduplication tracking)"""
     try:
-        from datetime import datetime, timedelta
 
         # Total processed events
         total_stmt = select(func.count(ProcessedEvent.event_id))
@@ -447,16 +446,21 @@ async def get_processed_events_stats(db: AsyncSession = Depends(get_db)) -> Dict
 
 @router.get("/files/failed")
 async def get_failed_files(
+    team_id: str,  # SECURITY: Required for multi-tenancy isolation
     limit: int = 50,
     db: AsyncSession = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Get all files that failed processing"""
+    """
+    Get all files that failed processing for a specific workspace
+
+    SECURITY NOTE: team_id is required to prevent cross-team data access
+    """
     try:
-        from app.models.file import File
 
         stmt = (
             select(File)
             .where(
+                File.team_id == team_id,  # CRITICAL: Only return files from this workspace
                 (File.is_processed == 0) | (File.processing_error.isnot(None))
             )
             .order_by(File.created_at.desc())
@@ -489,15 +493,19 @@ async def get_failed_files(
 
 @router.post("/files/retry-failed")
 async def retry_failed_files(
+    team_id: str,  # SECURITY: Required for multi-tenancy isolation
     db: AsyncSession = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Retry all files that failed processing"""
-    try:
-        from app.models.file import File
-        from app.models.workspace import Workspace
+    """
+    Retry all files that failed processing for a specific workspace
 
-        # Find all failed files
+    SECURITY NOTE: team_id is required to prevent cross-team data access
+    """
+    try:
+
+        # Find all failed files for this workspace only
         stmt = select(File).where(
+            File.team_id == team_id,  # CRITICAL: Only retry files from this workspace
             (File.is_processed == 0) | (File.processing_error.isnot(None))
         )
         result = await db.execute(stmt)
@@ -509,12 +517,6 @@ async def retry_failed_files(
                 "message": "No failed files found",
                 "count": 0
             }
-
-        # Get team_id from workspace (assuming single workspace for now)
-        workspace_stmt = select(Workspace).limit(1)
-        workspace_result = await db.execute(workspace_stmt)
-        workspace = workspace_result.scalar_one_or_none()
-        team_id = workspace.team_id if workspace else "T0420EE1VQ8"
 
         # Queue each file for reprocessing
         queued_count = 0
@@ -533,7 +535,7 @@ async def retry_failed_files(
                     "file_info": {"id": file.file_id},  # Minimal info - will fetch from Slack
                     "channel_id": file.channel_id,
                     "user_id": file.user_id,
-                    "team_id": team_id,
+                    "team_id": file.team_id,  # Use file's team_id (already verified above)
                     "message_id": file.message_id
                 }
             )
@@ -563,26 +565,30 @@ async def retry_failed_files(
 @router.post("/files/retry/{file_id}")
 async def retry_single_file(
     file_id: str,
+    team_id: str,  # SECURITY: Required for multi-tenancy isolation
     db: AsyncSession = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Retry processing a single file"""
-    try:
-        from app.models.file import File
-        from app.models.workspace import Workspace
+    """
+    Retry processing a single file
 
-        # Find the file
-        stmt = select(File).where(File.file_id == file_id)
+    SECURITY NOTE: team_id is required to verify file ownership and prevent
+    cross-team access
+    """
+    try:
+
+        # Find the file with team_id verification
+        stmt = select(File).where(
+            File.file_id == file_id,
+            File.team_id == team_id  # CRITICAL: Verify file belongs to this workspace
+        )
         result = await db.execute(stmt)
         file = result.scalar_one_or_none()
 
         if not file:
-            raise HTTPException(status_code=404, detail=f"File {file_id} not found")
-
-        # Get team_id from workspace
-        workspace_stmt = select(Workspace).limit(1)
-        workspace_result = await db.execute(workspace_stmt)
-        workspace = workspace_result.scalar_one_or_none()
-        team_id = workspace.team_id if workspace else "T0420EE1VQ8"
+            raise HTTPException(
+                status_code=404,
+                detail=f"File {file_id} not found in workspace {team_id}"
+            )
 
         # Clear error status
         file.processing_error = None
@@ -598,7 +604,7 @@ async def retry_single_file(
                 "file_info": {"id": file.file_id},
                 "channel_id": file.channel_id,
                 "user_id": file.user_id,
-                "team_id": team_id,
+                "team_id": file.team_id,  # Use file's verified team_id
                 "message_id": file.message_id
             }
         )

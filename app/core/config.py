@@ -121,6 +121,7 @@ class Settings(BaseSettings):
 
     # Query Enhancement Features
     enable_query_rewriting: bool = Field(default=True)
+    enable_intelligent_query: bool = Field(default=True)  # Use intelligent query service with decomposition, learning, graph
     query_rewriter_model: str = Field(default="gpt-3.5-turbo")
     query_rewriter_max_history: int = Field(default=6)  # Last 6 messages (3 turns)
     enable_llm_entity_extraction: bool = Field(default=False)  # Expensive, use regex by default
@@ -136,7 +137,7 @@ class Settings(BaseSettings):
     max_file_size_mb: int = Field(default=50)  # Maximum file size in MB
 
     # Code Intelligence Settings
-    enable_code_intelligence: bool = Field(default=True)
+    enable_code_intelligence: bool = Field(default=False)  # Temporarily disabled due to Voyage AI rate limits
     code_embedding_provider: str = Field(default="voyage")  # voyage|openai
     code_embedding_model: str = Field(default="voyage-code-2")
     code_embedding_dimension: int = Field(default=1536)

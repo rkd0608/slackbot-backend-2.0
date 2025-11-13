@@ -81,6 +81,16 @@ class QueueManager:
                 routing_key="workspace.#"
             )
 
+            # Bind processing queue for integration indexing tasks
+            await processing_queue.bind(
+                exchange=self.exchange,
+                routing_key="slack.index"
+            )
+            await processing_queue.bind(
+                exchange=self.exchange,
+                routing_key="github.index"
+            )
+
             self._initialized = True
             logger.info("queue_initialized", rabbitmq_host=settings.rabbitmq_host)
 

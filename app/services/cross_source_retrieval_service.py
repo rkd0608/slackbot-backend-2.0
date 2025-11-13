@@ -177,32 +177,32 @@ class CrossSourceRetrievalService:
                 metadata_filter['node_type'] = {'$in': [nt.value for nt in node_types]}
 
             # Search across namespaces
-            # For cross-source search, we'll search both semantic and code namespaces
+            # For cross-source search, we'll search both messages and code namespaces
             results = []
 
-            # Search semantic namespace
-            semantic_namespace = f"{team_id}:semantic"
+            # Search messages namespace (Slack messages)
+            messages_namespace = f"{team_id}:messages"
             try:
-                semantic_matches = vector_db_manager.query_namespace(
-                    namespace=semantic_namespace,
+                message_matches = vector_db_manager.query_namespace(
+                    namespace=messages_namespace,
                     vector=query_embedding,
                     top_k=top_k,
-                    filter=metadata_filter
+                    filter_dict=metadata_filter
                 )
 
-                if semantic_matches and 'matches' in semantic_matches:
-                    for match in semantic_matches['matches']:
-                        canonical_id = match['id'].replace(':semantic', '')
+                if message_matches and 'matches' in message_matches:
+                    for match in message_matches['matches']:
+                        canonical_id = match['id']
                         results.append({
                             'canonical_id': canonical_id,
                             'score': match['score'],
                             'metadata': match.get('metadata', {}),
-                            'embedding_type': 'semantic'
+                            'embedding_type': 'message'
                         })
             except Exception as e:
                 logger.warning(
-                    "semantic_namespace_search_failed",
-                    namespace=semantic_namespace,
+                    "messages_namespace_search_failed",
+                    namespace=messages_namespace,
                     error=str(e)
                 )
 
@@ -213,7 +213,7 @@ class CrossSourceRetrievalService:
                     namespace=code_namespace,
                     vector=query_embedding,
                     top_k=top_k // 2,  # Fewer code results
-                    filter=metadata_filter
+                    filter_dict=metadata_filter
                 )
 
                 if code_matches and 'matches' in code_matches:

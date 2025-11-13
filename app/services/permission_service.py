@@ -18,14 +18,19 @@ class PermissionService:
         user_id: str,
         db: AsyncSession
     ) -> Set[str]:
-        """Get list of channel IDs user has access to"""
+        """
+        Get list of channel IDs user has access to (Glean-style)
+
+        Uses user's own token for most accurate permissions.
+        Falls back to bot token if user token not available.
+        """
 
         # Check cache first (15 minute TTL)
         cache_key = f"permissions:{team_id}:{user_id}"
         cached = await cache_manager.get(cache_key)
 
         if cached and isinstance(cached, list):
-            logger.info(
+            logger.debug(
                 "permissions_cache_hit",
                 team_id=team_id,
                 user_id=user_id,
@@ -35,54 +40,112 @@ class PermissionService:
 
         # Cache miss - fetch from Slack API
         try:
-            access_token = await workspace_service.get_workspace_token(team_id, db)
+            # Try user's own token first (Glean-style - most accurate)
+            user_token = await workspace_service.get_user_token(team_id, user_id, db)
 
-            if not access_token:
-                logger.error("workspace_token_not_found", team_id=team_id)
-                return set()
+            if user_token:
+                # Use user's own token - inherits their Slack permissions directly
+                access_token = user_token
+                token_type = "user"
 
-            async with httpx.AsyncClient() as client:
-                # Get user's conversations (channels they're a member of)
-                response = await client.post(
-                    "https://slack.com/api/users.conversations",
-                    headers={"Authorization": f"Bearer {access_token}"},
-                    data={
-                        "user": user_id,
-                        "types": "public_channel,private_channel",
-                        "exclude_archived": False,
-                        "limit": 1000
-                    }
-                )
-
-                data = response.json()
-
-                if not data.get("ok"):
-                    logger.error(
-                        "slack_api_error",
-                        error=data.get("error"),
-                        team_id=team_id,
-                        user_id=user_id
+                # With user token, we can get their conversations directly (ALL types including DMs)
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        "https://slack.com/api/users.conversations",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        data={
+                            "types": "public_channel,private_channel,im,mpim",  # Include DMs and groups
+                            "exclude_archived": False,
+                            "limit": 1000
+                        }
                     )
+
+                    data = response.json()
+
+                    if not data.get("ok"):
+                        logger.warning(
+                            "user_token_permission_check_failed",
+                            error=data.get("error"),
+                            team_id=team_id,
+                            user_id=user_id,
+                            message="Falling back to bot token"
+                        )
+                        # Fall through to bot token method
+                        user_token = None
+                    else:
+                        channels = data.get("channels", [])
+                        channel_ids = {ch["id"] for ch in channels}
+
+                        logger.info(
+                            "permissions_fetched_with_user_token",
+                            team_id=team_id,
+                            user_id=user_id,
+                            channels=len(channel_ids),
+                            token_type="user"
+                        )
+
+                        # Cache for 15 minutes
+                        await cache_manager.set(
+                            cache_key,
+                            list(channel_ids),
+                            ttl=900
+                        )
+
+                        return channel_ids
+
+            # Fallback: Use bot token with users.conversations
+            if not user_token:
+                access_token = await workspace_service.get_workspace_token(team_id, db)
+                token_type = "bot"
+
+                if not access_token:
+                    logger.error("no_token_available", team_id=team_id, user_id=user_id)
                     return set()
 
-                channels = data.get("channels", [])
-                channel_ids = {ch["id"] for ch in channels}
+                async with httpx.AsyncClient() as client:
+                    # Get user's conversations using bot token (ALL types including DMs)
+                    response = await client.post(
+                        "https://slack.com/api/users.conversations",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        data={
+                            "user": user_id,
+                            "types": "public_channel,private_channel,im,mpim",  # Include DMs and groups
+                            "exclude_archived": False,
+                            "limit": 1000
+                        }
+                    )
 
-                logger.info(
-                    "permissions_fetched",
-                    team_id=team_id,
-                    user_id=user_id,
-                    channels=len(channel_ids)
-                )
+                    data = response.json()
 
-                # Cache for 15 minutes
-                await cache_manager.set(
-                    cache_key,
-                    list(channel_ids),
-                    ttl=900  # 15 minutes
-                )
+                    if not data.get("ok"):
+                        logger.error(
+                            "slack_api_error",
+                            error=data.get("error"),
+                            team_id=team_id,
+                            user_id=user_id,
+                            token_type=token_type
+                        )
+                        return set()
 
-                return channel_ids
+                    channels = data.get("channels", [])
+                    channel_ids = {ch["id"] for ch in channels}
+
+                    logger.info(
+                        "permissions_fetched_with_bot_token",
+                        team_id=team_id,
+                        user_id=user_id,
+                        channels=len(channel_ids),
+                        token_type="bot_fallback"
+                    )
+
+                    # Cache for 15 minutes
+                    await cache_manager.set(
+                        cache_key,
+                        list(channel_ids),
+                        ttl=900
+                    )
+
+                    return channel_ids
 
         except Exception as e:
             logger.error(

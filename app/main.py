@@ -21,7 +21,7 @@ from app.core.exceptions import (
     PermissionException
 )
 
-from app.api import health, events, admin, query, answer, commands, interactions, oauth, billing, stripe_webhooks, admin_dashboard, jobs, auth, onboarding, workspace, github_oauth, github_sync
+from app.api import health, events, admin, query, answer, commands, interactions, oauth, billing, stripe_webhooks, admin_dashboard, jobs, auth, onboarding, workspace, github_oauth, github_sync, feedback, digest, vocabulary, integration_status
 
 # Setup logging
 setup_logging()
@@ -70,6 +70,11 @@ async def lifespan(app: FastAPI):
         await queue_consumer.start()
         logger.info("queue_consumer_started")
 
+        # Start digest scheduler
+        from app.services.digest_scheduler import digest_scheduler
+        await digest_scheduler.start()
+        logger.info("digest_scheduler_started")
+
         logger.info("application_started")
         yield
 
@@ -80,9 +85,11 @@ async def lifespan(app: FastAPI):
         # Stop background workers
         from app.core.scheduler import scheduler_manager
         from app.workers.queue_consumer import queue_consumer
+        from app.services.digest_scheduler import digest_scheduler
 
         scheduler_manager.shutdown()
         await queue_consumer.stop()
+        await digest_scheduler.stop()
 
         # Close core services
         await db_manager.close()
@@ -163,6 +170,10 @@ app.include_router(billing.router, prefix="/api/v1", tags=["billing"])
 app.include_router(stripe_webhooks.router, prefix="/api/v1", tags=["stripe"])
 app.include_router(admin_dashboard.router, prefix="/api/v1", tags=["admin-dashboard"])
 app.include_router(jobs.router, prefix="/api/v1", tags=["jobs"])
+app.include_router(feedback.router, prefix="/api/v1", tags=["feedback"])
+app.include_router(digest.router, tags=["digest"])
+app.include_router(vocabulary.router, tags=["vocabulary"])
+app.include_router(integration_status.router, prefix="/api/v1", tags=["integration"])
 
 
 # Metrics endpoint

@@ -34,7 +34,8 @@ class FileProcessor:
         user_id: str,
         team_id: str,
         db: AsyncSession,
-        message_id: Optional[str] = None
+        message_id: Optional[str] = None,
+        bot_token: Optional[str] = None
     ) -> Optional[File]:
         """Process a file from Slack"""
 
@@ -45,7 +46,7 @@ class FileProcessor:
             return None
 
         # If file_info only has minimal data (just id), fetch complete info from Slack
-        if not file_info.get("url_private"):
+        if not file_info.get("url_private_download") and not file_info.get("url_private") and not file_info.get("permalink_public"):
             logger.info("fetching_complete_file_info", file_id=file_id)
             complete_file_info = await slack_client_manager.get_file_info(file_id)
             if complete_file_info:
@@ -54,9 +55,12 @@ class FileProcessor:
                 logger.error("failed_to_fetch_file_info", file_id=file_id)
                 return None
 
-        # Check if already processed
+        # Check if already processed (SECURITY: Filter by team_id for multi-tenancy)
         result = await db.execute(
-            select(File).where(File.file_id == file_id)
+            select(File).where(
+                File.file_id == file_id,
+                File.team_id == team_id  # CRITICAL: Prevent cross-team file access
+            )
         )
         existing = result.scalar_one_or_none()
 
@@ -102,6 +106,7 @@ class FileProcessor:
         if existing:
             # Update existing record with new data
             existing.message_id = message_id or existing.message_id
+            existing.team_id = team_id  # Ensure team_id is always up to date
             existing.channel_id = channel_id or existing.channel_id
             existing.user_id = user_id or existing.user_id
             existing.filename = file_info.get("name", existing.filename)
@@ -109,13 +114,28 @@ class FileProcessor:
             existing.mimetype = file_info.get("mimetype", existing.mimetype)
             existing.filetype = file_info.get("filetype", existing.filetype)
             existing.size = file_info.get("size", existing.size)
-            existing.slack_url = file_info.get("url_private", existing.slack_url)
+            # Prefer url_private_download (fresh auth URL), then url_private, then permalink_public
+            new_url = (
+                file_info.get("url_private_download") or
+                file_info.get("url_private") or
+                file_info.get("permalink_public", existing.slack_url)
+            )
+            logger.info(
+                "updating_file_url",
+                file_id=file_id,
+                old_url=existing.slack_url[:100] if existing.slack_url else None,
+                new_url=new_url[:100] if new_url else None,
+                has_permalink_public=bool(file_info.get("permalink_public")),
+                has_url_private_download=bool(file_info.get("url_private_download"))
+            )
+            existing.slack_url = new_url
             file_record = existing
         else:
-            # Create new record
+            # Create new record (SECURITY: team_id is REQUIRED)
             file_record = File(
                 file_id=file_id,
                 message_id=message_id,
+                team_id=team_id,  # CRITICAL: Multi-tenancy isolation
                 channel_id=channel_id,
                 user_id=user_id,
                 filename=file_info.get("name", "unknown"),
@@ -123,7 +143,12 @@ class FileProcessor:
                 mimetype=file_info.get("mimetype"),
                 filetype=file_info.get("filetype"),
                 size=file_info.get("size", 0),
-                slack_url=file_info.get("url_private"),
+                # Prefer url_private_download (fresh auth URL), then url_private, then permalink_public
+                slack_url=(
+                    file_info.get("url_private_download") or
+                    file_info.get("url_private") or
+                    file_info.get("permalink_public")
+                ),
                 slack_created_at=datetime.fromtimestamp(file_info.get("created", 0)),
                 expires_at=datetime.utcnow() + timedelta(days=30)
             )
@@ -159,17 +184,20 @@ class FileProcessor:
         await db.commit()
         await db.refresh(file_record)
 
-        # Download file from Slack
+        # Download file from Slack (SECURITY: Use workspace-specific token for multi-tenancy)
         try:
-            file_data = await slack_client_manager.download_file(file_record.slack_url)
+            file_data = await slack_client_manager.download_file(
+                file_record.slack_url,
+                bot_token=bot_token
+            )
 
             if not file_data:
                 file_record.processing_error = "Failed to download from Slack"
                 await db.commit()
                 return file_record
 
-            # Store original file in S3
-            s3_key = f"files/{file_id}/original"
+            # Store original file in S3 (SECURITY: Include team_id for isolation)
+            s3_key = f"{team_id}/files/{file_id}/original"
             success = storage_manager.upload_file(
                 file_data,
                 s3_key,
@@ -188,8 +216,8 @@ class FileProcessor:
             )
 
             if extracted_text:
-                # Store extracted text in S3
-                text_key = f"files/{file_id}/extracted_text"
+                # Store extracted text in S3 (SECURITY: Include team_id for isolation)
+                text_key = f"{team_id}/files/{file_id}/extracted_text"
                 storage_manager.upload_file(
                     extracted_text.encode('utf-8'),
                     text_key,
@@ -214,7 +242,9 @@ class FileProcessor:
                 else:
                     logger.error("failed_to_queue_embedding", file_id=file_id)
 
+            # Mark as successfully processed and clear any previous errors
             file_record.is_processed = 1
+            file_record.processing_error = None
             await db.commit()
 
             logger.info(

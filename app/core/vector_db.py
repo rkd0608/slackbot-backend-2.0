@@ -8,7 +8,7 @@ logger = get_logger(__name__)
 
 
 class VectorDBManager:
-    """Manages Pinecone vector database operations"""
+    """Manages inPinecone vector database operations"""
 
     DIMENSION = 1536  # OpenAI text-embedding-3-large
     METRIC = "cosine"

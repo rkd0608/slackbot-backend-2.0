@@ -229,14 +229,29 @@ class NotificationWorker:
                 tier_changes = 0
 
                 for workspace in workspaces:
+                    # Store team_id early to avoid expired attribute access
+                    team_id = workspace.team_id
+                    bot_token = workspace.bot_access_token
+
                     try:
                         # Fetch current user count from Slack
                         import httpx
                         async with httpx.AsyncClient() as client:
                             response = await client.post(
                                 "https://slack.com/api/users.list",
-                                headers={"Authorization": f"Bearer {workspace.bot_access_token}"}
+                                headers={"Authorization": f"Bearer {bot_token}"}
                             )
+
+                            # Check HTTP status first
+                            if response.status_code != 200:
+                                logger.error(
+                                    "slack_api_http_error",
+                                    team_id=team_id,
+                                    status_code=response.status_code,
+                                    response_text=response.text[:200]
+                                )
+                                continue
+
                             data = response.json()
 
                             if data.get("ok"):
@@ -279,7 +294,7 @@ class NotificationWorker:
                             else:
                                 logger.error(
                                     "slack_user_list_failed",
-                                    team_id=workspace.team_id,
+                                    team_id=team_id,
                                     error=data.get("error")
                                 )
 
@@ -288,7 +303,7 @@ class NotificationWorker:
                         logger.error(
                             "user_count_sync_failed",
                             error=str(e),
-                            team_id=workspace.team_id
+                            team_id=team_id
                         )
 
                 logger.info(

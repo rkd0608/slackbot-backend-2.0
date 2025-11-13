@@ -25,6 +25,7 @@ class Workspace(Base):
 
     # Installation details
     installer_user_id = Column(String(50), nullable=False)  # Admin who installed
+    installer_user_token = Column(Text, nullable=True)  # Encrypted user access token for Glean-style indexing
     installer_email = Column(String(255), nullable=True)
     installed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     is_active = Column(Integer, default=1, nullable=False)  # 1=active, 0=inactive

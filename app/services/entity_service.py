@@ -107,26 +107,84 @@ class EntityService:
     async def _extract_entities_llm(self, text: str) -> List[Dict[str, Any]]:
         """Extract entities using OpenAI GPT-4"""
         try:
-            prompt = f"""Extract key entities from this Slack message. Identify:
-- Technical terms (databases, services, APIs, technologies)
-- Business concepts (project names, initiatives, products)
-- Tools and platforms
-- Important concepts being discussed
+            prompt = f"""<task>
+Extract key entities from a Slack message to build a knowledge graph.
+These entities help users find related discussions and understand technical topics.
+Focus on entities that would be useful for search and topic tracking.
+</task>
 
-Message: "{text}"
+<message>
+{text}
+</message>
 
-Return JSON array of entities:
+<entity_categories>
+Extract these types:
+- technical: Technologies, databases, services, APIs (e.g., "PostgreSQL", "REST API", "Redis")
+- business: Projects, initiatives, products (e.g., "Project Phoenix", "Q4 launch", "Mobile app")
+- tool: Software tools and platforms (e.g., "GitHub", "Jenkins", "Slack", "Jira")
+- concept: Important concepts or topics (e.g., "performance optimization", "security audit", "API migration")
+</entity_categories>
+
+<output_format>
+Return a JSON array of entities:
 [
-  {{"text": "entity text", "type": "technical|business|tool|concept"}},
+  {{"text": "entity name", "type": "category"}},
   ...
 ]
+</output_format>
 
-Only extract significant entities (ignore common words). Limit to 10 most important."""
+<guidelines>
+1. Extract only SIGNIFICANT entities (ignore common words like "thing", "stuff", "it")
+2. Prefer specific terms over generic ones ("PostgreSQL" not "database")
+3. Include acronyms if they're meaningful (API, CI/CD, ML)
+4. Limit to 10 most important entities
+5. Use the exact text as it appears in the message (preserve casing)
+</guidelines>
+
+<examples>
+<example>
+Message: "We need to migrate from PostgreSQL to MySQL for the mobile app project"
+Output:
+[
+  {{"text": "PostgreSQL", "type": "technical"}},
+  {{"text": "MySQL", "type": "technical"}},
+  {{"text": "mobile app project", "type": "business"}},
+  {{"text": "migration", "type": "concept"}}
+]
+</example>
+
+<example>
+Message: "The API gateway is having performance issues in production"
+Output:
+[
+  {{"text": "API gateway", "type": "technical"}},
+  {{"text": "performance issues", "type": "concept"}},
+  {{"text": "production", "type": "concept"}}
+]
+</example>
+
+<example>
+Message: "Let's use GitHub Actions for our CI/CD pipeline instead of Jenkins"
+Output:
+[
+  {{"text": "GitHub Actions", "type": "tool"}},
+  {{"text": "CI/CD pipeline", "type": "concept"}},
+  {{"text": "Jenkins", "type": "tool"}}
+]
+</example>
+</examples>"""
 
             response = await self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are an expert at extracting key entities from technical discussions."},
+                    {
+                        "role": "system",
+                        "content": """You are an entity extraction specialist for building knowledge graphs from workplace conversations.
+
+Your task is to identify meaningful entities (technologies, projects, tools, concepts) that help connect related discussions and enable topic tracking.
+
+Focus on entities that would be valuable for search and knowledge organization. Return only valid JSON."""
+                    },
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.1,

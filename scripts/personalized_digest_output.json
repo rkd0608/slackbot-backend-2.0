@@ -1,0 +1,337 @@
+{
+  "digest": {
+    "team_id": "T0420EE1VQ8",
+    "user_id": "U0417Q7L4A1",
+    "generated_at": "2025-10-29T18:28:18.211983",
+    "period_hours": 24,
+    "hot_topics": [
+      {
+        "entity": "migration",
+        "entity_type": "topic",
+        "mention_count": 104,
+        "canonical_id": "entity:concept:migration",
+        "github_connections": 0,
+        "github_links": []
+      },
+      {
+        "entity": "REST",
+        "entity_type": "technology",
+        "mention_count": 45,
+        "canonical_id": "entity:technical:rest",
+        "github_connections": 0,
+        "github_links": []
+      },
+      {
+        "entity": "db",
+        "entity_type": "technology",
+        "mention_count": 34,
+        "canonical_id": "entity:technical:database",
+        "github_connections": 0,
+        "github_links": []
+      },
+      {
+        "entity": "postgres",
+        "entity_type": "technology",
+        "mention_count": 15,
+        "canonical_id": "entity:technical:postgres",
+        "github_connections": 0,
+        "github_links": []
+      },
+      {
+        "entity": "PostgreSQL",
+        "entity_type": "technology",
+        "mention_count": 14,
+        "canonical_id": "entity:technical:postgresql",
+        "github_connections": 0,
+        "github_links": []
+      },
+      {
+        "entity": "https",
+        "entity_type": "technology",
+        "mention_count": 12,
+        "canonical_id": "entity:technical:https",
+        "github_connections": 0,
+        "github_links": []
+      },
+      {
+        "entity": "slack",
+        "entity_type": "technology",
+        "mention_count": 12,
+        "canonical_id": "entity:tool:slack",
+        "github_connections": 0,
+        "github_links": []
+      },
+      {
+        "entity": "MySQL",
+        "entity_type": "technology",
+        "mention_count": 9,
+        "canonical_id": "entity:technical:mysql",
+        "github_connections": 0,
+        "github_links": []
+      },
+      {
+        "entity": "API",
+        "entity_type": "technology",
+        "mention_count": 7,
+        "canonical_id": "entity:technical:API",
+        "github_connections": 0,
+        "github_links": []
+      },
+      {
+        "entity": "performance",
+        "entity_type": "topic",
+        "mention_count": 6,
+        "canonical_id": "entity:concept:performance",
+        "github_connections": 0,
+        "github_links": []
+      }
+    ],
+    "active_discussions": [],
+    "cross_source_links": [],
+    "unresolved_questions": [
+      {
+        "message_id": "1760298120.271089",
+        "channel_id": "C09GW3T2P7V",
+        "text": "I like this! It also gives us better observability. We can track:\n\u2022 How many events are pending processing\n\u2022 Average processing time per event type\n\u2022 Failed events that need retry\nShould we add this t",
+        "author": "U09H7A34YNS",
+        "reply_count": 0,
+        "created_at": "2025-10-29T05:08:02"
+      },
+      {
+        "message_id": "1760298133.968379",
+        "channel_id": "C09GW3T2P7V",
+        "text": "From a product perspective, this sounds like technical debt / infrastructure work. Is this user-facing or internal improvement?",
+        "author": "U09H79SESKG",
+        "reply_count": 0,
+        "created_at": "2025-10-29T05:08:02"
+      },
+      {
+        "message_id": "1760298151.521299",
+        "channel_id": "C09GW3T2P7V",
+        "text": "Got it! That's important for enterprise customers. Let's prioritize it after billing but before knowledge graph. So the order is:\n1. Billing (2 weeks)\n2. Event WAL (1 week)\n3. Knowledge graph (3 weeks",
+        "author": "U09H79SESKG",
+        "reply_count": 0,
+        "created_at": "2025-10-29T05:08:02"
+      },
+      {
+        "message_id": "1760298158.894639",
+        "channel_id": "C09GW3T2P7V",
+        "text": "Works for me! <@U09H7A34YNS> can you take ownership of the WAL implementation? I'll focus on finishing billing.",
+        "author": "U0417Q7L4A1",
+        "reply_count": 0,
+        "created_at": "2025-10-29T05:08:02"
+      },
+      {
+        "message_id": "1760299410.493649",
+        "channel_id": "C09GW3T2P7V",
+        "text": "With this schema, we can answer complex queries like:\n- \"Show me all projects that Indu has worked on\"\n- \"What concepts are related to 'authentication'?\"\n- \"Who has discussed Redis caching with Rakshi",
+        "author": "U0417Q7L4A1",
+        "reply_count": 0,
+        "created_at": "2025-10-29T05:08:02"
+      }
+    ],
+    "expert_activity": [
+      {
+        "user_id": "U09CFHRNFL3",
+        "message_count": 149,
+        "activity_score": 149
+      },
+      {
+        "user_id": "U09H79SESKG",
+        "message_count": 11,
+        "activity_score": 11
+      },
+      {
+        "user_id": "U09H7A34YNS",
+        "message_count": 10,
+        "activity_score": 10
+      }
+    ],
+    "mentions": [
+      {
+        "message_id": "1758859392.233379",
+        "channel_id": "C041D76JMRA",
+        "text": "Hey <@U0417Q7L4A1> I was able to pull up the staging environment. <@U09H7A34YNS> pls check and update",
+        "author": "U09H79SESKG",
+        "created_at": "2025-10-29T05:07:54"
+      }
+    ],
+    "my_threads": [
+      {
+        "message_id": "1757031291.823239",
+        "channel_id": "C041D76JMRA",
+        "text": "<@U09DP876B7Y> do you remember how to restart kafka connector?",
+        "author": "U0417Q7L4A1",
+        "user_replies": 2,
+        "created_at": "2025-10-29T05:07:56"
+      },
+      {
+        "message_id": "1758871005.061389",
+        "channel_id": "C041D76JMRA",
+        "text": "<@U09CFHRNFL3> can you tell me about the postgres migration timeline",
+        "author": "U0417Q7L4A1",
+        "user_replies": 1,
+        "created_at": "2025-10-29T05:07:54"
+      },
+      {
+        "message_id": "1758867268.311539",
+        "channel_id": "C041D76JMRA",
+        "text": "<@U09CFHRNFL3> give me the code given by Ananya",
+        "author": "U0417Q7L4A1",
+        "user_replies": 1,
+        "created_at": "2025-10-29T05:07:54"
+      },
+      {
+        "message_id": "1758864177.486609",
+        "channel_id": "C041D76JMRA",
+        "text": "<@U09CFHRNFL3> what happened today here?",
+        "author": "U0417Q7L4A1",
+        "user_replies": 1,
+        "created_at": "2025-10-29T05:07:54"
+      },
+      {
+        "message_id": "1758871647.431769",
+        "channel_id": "C041D76JMRA",
+        "text": "<@U09CFHRNFL3> can you find the code with the web scraper?",
+        "author": "U0417Q7L4A1",
+        "user_replies": 1,
+        "created_at": "2025-10-29T05:07:54"
+      }
+    ],
+    "summary": "\ud83d\udcac You were mentioned 1 times | \ud83e\uddf5 5 active threads you're in | \ud83d\udd25 Trending: migration | \u2753 5 questions need answers"
+  },
+  "slack_blocks": [
+    {
+      "type": "header",
+      "text": {
+        "type": "plain_text",
+        "text": "\ud83d\udcec Your Daily Digest",
+        "emoji": true
+      }
+    },
+    {
+      "type": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "text": "Last 24 hours \u2022 \ud83d\udcac You were mentioned 1 times | \ud83e\uddf5 5 active threads you're in | \ud83d\udd25 Trending: migration | \u2753 5 questions need answers"
+        }
+      ]
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*\ud83d\udcac You Were Mentioned*"
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "\u2022 Hey <@U0417Q7L4A1> I was able to pull up the staging environment. <@U09H7A34YNS> pls check and update..."
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*\ud83e\uddf5 Threads You're Following*"
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "\u2022 <@U09DP876B7Y> do you remember how to restart kafka connector?...\n  You replied 2 times"
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "\u2022 <@U09CFHRNFL3> can you tell me about the postgres migration timeline...\n  You replied 1 times"
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "\u2022 <@U09CFHRNFL3> give me the code given by Ananya...\n  You replied 1 times"
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*\ud83d\udd25 Trending in Your Workspace*"
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "\u2022 *migration* - 104 mentions"
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "\u2022 *REST* - 45 mentions"
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "\u2022 *db* - 34 mentions"
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*\u2753 Questions That Need Answers*"
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "\u2022 I like this! It also gives us better observability. We can track:\n\u2022 How many events are pending processing\n\u2022 Average processing time per event type\n\u2022 ..."
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "\u2022 From a product perspective, this sounds like technical debt / infrastructure work. Is this user-facing or internal improvement?..."
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "text": "\ud83d\udca1 Personalized just for you \u2022 Type `/slackbot settings` to customize or mute"
+        }
+      ]
+    }
+  ]
+}

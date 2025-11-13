@@ -33,10 +33,11 @@ class QueryAnalyzer:
                 messages=[
                     {
                         "role": "system",
-                        "content": """You are a query analysis expert for Slack workspace search.
-Your job is to deeply understand user questions and extract structured information for optimal retrieval.
+                        "content": """You are a query analysis specialist. Your task is to parse user search queries and extract structured metadata to enable precise information retrieval across Slack, GitHub, and other sources.
 
-Analyze queries with precision and return valid JSON only."""
+Your analysis directly impacts search quality - accurate extraction means users find exactly what they need.
+
+Always return valid, complete JSON matching the specified schema."""
                     },
                     {
                         "role": "user",
@@ -74,67 +75,148 @@ Analyze queries with precision and return valid JSON only."""
     def _build_analysis_prompt(self, query: str) -> str:
         """Build structured analysis prompt for GPT-4"""
 
-        return f"""Analyze this Slack workspace question:
+        return f"""<task>
+Analyze this Slack workspace search query to extract structured information for optimal retrieval.
+Your analysis will be used to search across Slack messages, GitHub code, and files.
+</task>
 
-"{query}"
+<query>
+{query}
+</query>
 
-Extract and return a JSON object with:
+<output_schema>
+Return a JSON object with these fields:
 
-1. **query_type**: One of:
-   - "factual" - seeking specific information/facts
-   - "summary" - wants summary/overview of discussions
-   - "code" - looking for code/technical implementations
-   - "troubleshooting" - debugging/problem-solving help
-   - "timeline" - chronological sequence of events
-   - "people" - who said/did something
-   - "files" - looking for documents/attachments
+1. query_type: Classify as ONE of these:
+   - "factual" - seeks specific facts/information
+   - "summary" - wants overview/summary of discussions
+   - "code" - needs code/implementations
+   - "troubleshooting" - debugging/problem-solving
+   - "timeline" - chronological events
+   - "people" - attribution (who said/did what)
+   - "files" - documents/attachments
 
-2. **intents**: Array of specific intents like ["find_code", "understand_context", "get_summary"]
+2. intents: Array of specific intents
+   Examples: ["find_code", "understand_context", "get_summary"]
 
-3. **entities**: Array of important entities with type:
-   [
-     {{"text": "HTML file", "type": "object"}},
-     {{"text": "authentication bug", "type": "issue"}},
-     {{"text": "React", "type": "technology"}}
-   ]
+3. entities: Array of key entities with type
+   Format: [{{"text": "entity name", "type": "category"}}]
    Types: object, issue, technology, project, feature, concept
 
-4. **channels**: Array of channel names WITHOUT # prefix. Examples:
-   - "#engineering" → ["engineering"]
-   - "in the dev channel" → ["dev"]
-   - "general and random channels" → ["general", "random"]
+4. channels: Channel names WITHOUT # prefix
+   Examples: "#engineering" → ["engineering"]
 
-5. **users**: Array of user mentions WITHOUT @ prefix. Examples:
-   - "@john" → ["john"]
-   - "from Sarah" → ["sarah"]
-   - "did Bob or Alice say" → ["bob", "alice"]
+5. users: User names WITHOUT @ prefix
+   Examples: "@john" → ["john"]
 
-6. **temporal**: Object with time constraints (null if none):
-   {{
-     "reference": "last week" | "yesterday" | "this month" | "after May 1st" | null,
-     "relative_days": -7 | -1 | null,  # negative = past
-     "start_date": "2025-10-01" | null,
-     "end_date": "2025-10-05" | null
+6. temporal: Time constraints (null if none)
+   Format: {{
+     "reference": "last week" | "yesterday" | null,
+     "relative_days": -7 | null,
+     "start_date": "YYYY-MM-DD" | null,
+     "end_date": "YYYY-MM-DD" | null
    }}
 
-7. **has_code_intent**: boolean - true if looking for code/implementations
+7. has_code_intent: boolean
+   True if query seeks code/implementation
 
-8. **code_languages**: Array of programming languages mentioned: ["python", "sql", "javascript"]
+8. code_languages: Array of mentioned languages
+   Examples: ["python", "sql", "javascript"]
 
-9. **keywords**: Array of 3-5 most important search terms
+9. keywords: 3-5 most important search terms
 
-10. **search_scope**: "narrow" | "broad" - how wide to search
+10. search_scope: "narrow" | "broad"
+    narrow = specific entity/file, broad = general topic
 
-11. **requires_aggregation**: boolean - needs to combine multiple messages
+11. requires_aggregation: boolean
+    True if needs combining multiple messages
+</output_schema>
 
-Return ONLY valid JSON, no explanation."""
+<examples>
+<example>
+Query: "What did John say about the authentication bug last week?"
+Output:
+{{
+  "query_type": "people",
+  "intents": ["find_person_statements", "temporal_filter"],
+  "entities": [
+    {{"text": "authentication bug", "type": "issue"}},
+    {{"text": "authentication", "type": "technology"}}
+  ],
+  "channels": [],
+  "users": ["john"],
+  "temporal": {{
+    "reference": "last week",
+    "relative_days": -7,
+    "start_date": null,
+    "end_date": null
+  }},
+  "has_code_intent": false,
+  "code_languages": [],
+  "keywords": ["authentication", "bug", "john"],
+  "search_scope": "narrow",
+  "requires_aggregation": false
+}}
+</example>
+
+<example>
+Query: "Show me the Python code for the email service"
+Output:
+{{
+  "query_type": "code",
+  "intents": ["find_code", "find_implementation"],
+  "entities": [
+    {{"text": "email service", "type": "feature"}},
+    {{"text": "Python", "type": "technology"}}
+  ],
+  "channels": [],
+  "users": [],
+  "temporal": null,
+  "has_code_intent": true,
+  "code_languages": ["python"],
+  "keywords": ["email", "service", "code"],
+  "search_scope": "narrow",
+  "requires_aggregation": false
+}}
+</example>
+
+<example>
+Query: "Summarize the discussion in #engineering about database migration"
+Output:
+{{
+  "query_type": "summary",
+  "intents": ["get_summary", "find_discussion"],
+  "entities": [
+    {{"text": "database migration", "type": "concept"}},
+    {{"text": "database", "type": "technology"}}
+  ],
+  "channels": ["engineering"],
+  "users": [],
+  "temporal": null,
+  "has_code_intent": false,
+  "code_languages": [],
+  "keywords": ["database", "migration", "discussion"],
+  "search_scope": "broad",
+  "requires_aggregation": true
+}}
+</example>
+</examples>
+
+<instructions>
+1. Read the query carefully
+2. Identify the primary intent (what does the user ultimately want?)
+3. Extract all relevant entities, channels, users
+4. Determine temporal scope (when)
+5. Classify query type based on what output the user needs
+6. Return ONLY valid JSON (no markdown, no explanations)
+</instructions>"""
 
     def _process_analysis(self, analysis: Dict[str, Any], original_query: str) -> Dict[str, Any]:
         """Post-process and validate GPT-4 analysis"""
 
         # FIRST: Extract Slack-formatted channel IDs from original query (BEFORE lowercasing!)
-        # Format: <#CHANNEL_ID|channel_name> - we want the CHANNEL_ID in uppercase
-        slack_channel_ids = re.findall(r'<#([A-Z0-9]+)(?:\|[^>]+)?>', original_query)
+        # Format: <#CHANNEL_ID|channel_name> or <#CHANNEL_ID|> - we want the CHANNEL_ID in uppercase
+        slack_channel_ids = re.findall(r'<#([A-Z0-9]+)(?:\|[^>]*)?>', original_query)
 
         # THEN: Get LLM-extracted channel names (lowercased)
         llm_channels = [ch.lower().strip() for ch in analysis.get("channels", [])]

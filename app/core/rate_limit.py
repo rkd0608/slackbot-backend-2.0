@@ -1,7 +1,9 @@
 """Rate limiting middleware using Redis"""
-from fastapi import Request, HTTPException, status
-from typing import Optional
 from datetime import datetime, timedelta
+
+from fastapi import Request, HTTPException, status
+from starlette.middleware.base import BaseHTTPMiddleware
+
 from app.core.cache import cache_manager
 from app.core.logging import get_logger
 
@@ -158,7 +160,6 @@ rate_limiter = RateLimiter()
 
 
 # Middleware for automatic rate limiting
-from starlette.middleware.base import BaseHTTPMiddleware
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

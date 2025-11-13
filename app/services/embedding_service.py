@@ -195,7 +195,17 @@ class EmbeddingService:
             )
             file_record = result.scalar_one_or_none()
 
-            if not file_record or not file_record.extracted_text:
+            if not file_record:
+                logger.error("file_not_found_for_embedding", file_id=file_id)
+                return False
+
+            if not file_record.extracted_text:
+                logger.error(
+                    "file_missing_extracted_text",
+                    file_id=file_id,
+                    has_s3_text_key=bool(file_record.s3_text_key),
+                    s3_text_key=file_record.s3_text_key
+                )
                 return False
 
             # Skip if already embedded (prevent duplicates)
@@ -203,9 +213,20 @@ class EmbeddingService:
                 logger.info("file_already_embedded", file_id=file_id, vector_id=file_record.vector_id)
                 return True
 
-            # Get channel name and team_id
+            # Get team_id directly from file (SECURITY FIX: Don't rely on Channel lookup)
+            team_id = file_record.team_id
+
+            # Validate team_id is present (critical for multi-tenancy)
+            if not team_id:
+                logger.error(
+                    "file_missing_team_id",
+                    file_id=file_id,
+                    channel_id=file_record.channel_id
+                )
+                return False  # Cannot embed file without team_id - security risk
+
+            # Get channel name (optional, for context only)
             channel_name = None
-            team_id = None
             if file_record.channel_id:
                 channel_result = await db.execute(
                     select(Channel).where(Channel.channel_id == file_record.channel_id)
@@ -213,7 +234,6 @@ class EmbeddingService:
                 channel = channel_result.scalar_one_or_none()
                 if channel:
                     channel_name = channel.channel_name
-                    team_id = channel.team_id
 
             # Build context
             context = f"File: {file_record.filename}\n"
@@ -244,37 +264,27 @@ class EmbeddingService:
                 "text": file_record.extracted_text[:1000]
             }
 
-            # Add team_id if available
-            if team_id:
-                metadata["team_id"] = team_id
+            # Add team_id to metadata (REQUIRED for multi-tenancy filtering)
+            metadata["team_id"] = team_id
 
-            # Add channel_name if available
+            # Add channel_name if available (optional for context)
             if channel_name:
                 metadata["channel_name"] = channel_name
 
-            # Upsert to team-specific namespace for multi-tenancy
-            # Use files namespace for file embeddings
-            if team_id:
-                namespace = vector_db_manager.get_team_namespace(
-                    team_id,
-                    vector_db_manager.NAMESPACE_FILES
-                )
-                success = vector_db_manager.upsert_to_namespace(
-                    namespace=namespace,
-                    vectors=[{
-                        "id": vector_id,
-                        "values": embedding,
-                        "metadata": metadata
-                    }]
-                )
-            else:
-                # Fallback to default namespace if team_id not available (shouldn't happen)
-                logger.warning("file_missing_team_id", file_id=file_id)
-                success = vector_db_manager.upsert([{
+            # Upsert to team-specific namespace for multi-tenancy (SECURITY CRITICAL)
+            # team_id is guaranteed to exist at this point due to validation above
+            namespace = vector_db_manager.get_team_namespace(
+                team_id,
+                vector_db_manager.NAMESPACE_FILES
+            )
+            success = vector_db_manager.upsert_to_namespace(
+                namespace=namespace,
+                vectors=[{
                     "id": vector_id,
                     "values": embedding,
                     "metadata": metadata
-                }])
+                }]
+            )
 
             if success:
                 file_record.vector_id = vector_id

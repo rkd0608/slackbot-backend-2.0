@@ -77,12 +77,13 @@ class QueryRewriter:
                         "content": """You are a query rewriter. Your job is to rewrite user queries into standalone questions that don't require conversation context.
 
 Rules:
-1. Resolve pronouns (it, that, this, they, the channel, etc.) to their actual referents
-2. Include missing context from conversation history (especially channel names!)
-3. Preserve the user's intent exactly
-4. Keep the query concise
-5. If the query is already standalone, return it unchanged
-6. IMPORTANT: If the original query mentioned a specific channel (like #engineering), include it in ALL follow-up queries
+1. **DETECT TOPIC CHANGES**: If the new query introduces a completely different topic from the conversation history, return it UNCHANGED. Do NOT try to relate unrelated topics.
+2. Resolve pronouns (it, that, this, they, the channel, etc.) to their actual referents
+3. Include missing context from conversation history (especially channel names!)
+4. Preserve the user's intent exactly
+5. Keep the query concise
+6. If the query is already standalone, return it unchanged
+7. IMPORTANT: If the original query mentioned a specific channel (like #engineering), include it in ALL follow-up queries
 
 Examples:
 Input: "What about the database?"
@@ -104,6 +105,16 @@ Output: "anything discussed on cache in the #engineering channel?"
 Input: "any sql queries shared?"
 History: "User: what was discussed in the #engineering channel?\nAssistant: Discussions in #engineering..."
 Output: "any sql queries shared in the #engineering channel?"
+
+Input: "ok I'm looking for a ai figma prompt"
+History: "User: what was discussed about the event log issue?\nAssistant: The event log issue was addressed..."
+Output: "ok I'm looking for a ai figma prompt"
+(NOTE: "figma prompt" is a NEW TOPIC unrelated to "event logs" - return unchanged)
+
+Input: "find me the slack bot code"
+History: "User: what's the database schema?\nAssistant: Here's the database schema..."
+Output: "find me the slack bot code"
+(NOTE: "slack bot code" is UNRELATED to "database schema" - return unchanged)
 """
                     },
                     {

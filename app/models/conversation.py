@@ -15,14 +15,20 @@ class Conversation(Base):
     # Conversation identification
     conversation_id = Column(String(100), unique=True, nullable=False, index=True)
     user_id = Column(String(50), nullable=False, index=True)
+    team_id = Column(String(100), nullable=False, index=True)  # Workspace team ID
+    channel_id = Column(String(100), nullable=True)  # Optional channel context
 
     # Conversation metadata
     title = Column(String(500), nullable=True)  # Auto-generated from first query
     turn_count = Column(Integer, default=0)
+    message_count = Column(Integer, default=0)  # Number of messages in context
 
     # Conversation history (list of turns)
     # Each turn: {"role": "user|assistant", "content": "...", "timestamp": "..."}
     history = Column(JSON, nullable=False, default=list)
+
+    # Context data (entities, topics, intents from recent queries)
+    context = Column(JSON, nullable=True, default=dict)
 
     # Last query for context
     last_query = Column(Text, nullable=True)

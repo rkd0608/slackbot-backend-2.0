@@ -35,6 +35,11 @@ from app.models.integration import (
 )
 from app.models.cross_source_node import CrossSourceNode
 from app.models.cross_source_edge import CrossSourceEdge
+from app.models.integration_status import IntegrationStatus, CrossSourceGraph, IndexingJob
+from app.models.team_vocabulary import TeamVocabulary
+from app.models.learning_signal import LearningSignal
+from app.models.user_preferences import UserPreferences
+from app.models.code_snippet import CodeSnippet
 import httpx
 
 logger = get_logger(__name__)
@@ -223,16 +228,29 @@ class WorkspaceDeletionService:
             (CrossSourceEdge, "cross_source_edges"),
             (CrossSourceNode, "cross_source_nodes"),
 
+            # Integration status and graph tracking
+            (IndexingJob, "indexing_jobs"),
+            (CrossSourceGraph, "cross_source_graphs"),
+            (IntegrationStatus, "integration_statuses"),
+
             # External integrations
             (IntegrationSyncJob, "integration_sync_jobs"),
             (ExternalContent, "external_content"),
             (UserIntegrationConnection, "user_integration_connections"),
             (Integration, "integrations"),
 
+            # Learning and vocabulary
+            (LearningSignal, "learning_signals"),
+            (TeamVocabulary, "team_vocabulary"),
+
+            # User preferences
+            (UserPreferences, "user_preferences"),
+
             # Slack data (with team_id)
             (EntityRelationship, "entity_relationships"),
             (Entity, "entities"),
             (QueryLog, "query_logs"),
+            (CodeSnippet, "code_snippets"),  # Has CASCADE on message_id, but delete explicitly
             (Message, "messages"),
             (ProcessedEvent, "processed_events"),
             (EventBuffer, "event_buffers"),

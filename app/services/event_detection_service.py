@@ -137,35 +137,127 @@ class EventDetectionService:
         """Use LLM to detect events from text"""
 
         try:
-            prompt = f"""Analyze this Slack message and determine if it describes a significant organizational event.
+            prompt = f"""<task>
+Detect significant organizational events from Slack messages.
+These events help teams track important milestones, incidents, and changes.
+Only flag messages that describe noteworthy events - ignore routine status updates.
+</task>
 
-Message: "{text}"
+<message_context>
+Text: "{text}"
 Channel: {message.channel_name}
 Timestamp: {message.timestamp}
+</message_context>
 
-Event types to detect:
-- deployment: Software deployments to production
-- migration: Database/infrastructure migrations
-- incident: Production incidents or outages
-- feature_launch: New feature releases
-- announcement: Important organizational announcements
+<event_types>
+Detect these event categories:
+1. deployment - Software deployments to production/staging
+2. migration - Database or infrastructure migrations
+3. incident - Production incidents, outages, or critical bugs
+4. feature_launch - New feature releases or product launches
+5. announcement - Important organizational announcements
+</event_types>
 
-Return JSON:
+<output_format>
 {{
-  "is_event": true/false,
+  "is_event": boolean,
   "type": "event_type",
   "name": "brief event name (max 100 chars)",
-  "description": "brief description",
-  "severity": "low/medium/high/critical" (for incidents only),
+  "description": "brief description (max 200 chars)",
+  "severity": "low|medium|high|critical",
   "confidence": 0.0-1.0
 }}
+</output_format>
 
-Only detect significant events. Return {{"is_event": false}} for routine messages."""
+<detection_criteria>
+Significant events have these characteristics:
+- Affect production systems or users
+- Represent completed or planned changes
+- Impact multiple people or systems
+- Are time-bound occurrences
+
+NOT significant:
+- Routine questions or discussions
+- Planning conversations without decisions
+- General troubleshooting
+- Personal updates
+</detection_criteria>
+
+<examples>
+<example>
+Message: "Just deployed v2.4.0 to production. All health checks passing."
+Output:
+{{
+  "is_event": true,
+  "type": "deployment",
+  "name": "v2.4.0 production deployment",
+  "description": "Version 2.4.0 deployed to production successfully",
+  "severity": "low",
+  "confidence": 0.95
+}}
+</example>
+
+<example>
+Message: "URGENT: Database is down, users seeing 500 errors. Working on it"
+Output:
+{{
+  "is_event": true,
+  "type": "incident",
+  "name": "Database outage - 500 errors",
+  "description": "Production database outage causing user-facing errors",
+  "severity": "critical",
+  "confidence": 0.98
+}}
+</example>
+
+<example>
+Message: "Planning to migrate from Postgres to MySQL next quarter"
+Output:
+{{
+  "is_event": false,
+  "type": null,
+  "name": null,
+  "description": null,
+  "severity": null,
+  "confidence": 0.3
+}}
+Reason: Planning discussion, not an actual event occurrence
+</example>
+
+<example>
+Message: "Launched the new dashboard feature for beta users today!"
+Output:
+{{
+  "is_event": true,
+  "type": "feature_launch",
+  "name": "New dashboard feature beta launch",
+  "description": "Dashboard feature released to beta users",
+  "severity": "low",
+  "confidence": 0.92
+}}
+</example>
+</examples>
+
+<instructions>
+1. Read the message carefully
+2. Determine if it describes a COMPLETED or IN-PROGRESS event (not just planning)
+3. Assess significance - would a team member care about this in 1 week?
+4. If significant, classify the event type
+5. Set confidence based on clarity and definitiveness
+6. Return JSON only (no markdown, no explanations)
+</instructions>"""
 
             response = await self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are an expert at identifying significant organizational events from technical discussions."},
+                    {
+                        "role": "system",
+                        "content": """You are an event detection specialist for tracking significant organizational milestones and incidents.
+
+Your task is to identify noteworthy events (deployments, incidents, launches, migrations) from workplace messages, helping teams maintain an event timeline and understand what happened when.
+
+Focus on completed or in-progress events that impact systems, users, or the organization. Return only valid JSON."""
+                    },
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.1,

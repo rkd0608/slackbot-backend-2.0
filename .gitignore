@@ -42,9 +42,10 @@ wheels/
 htmlcov/
 .tox/
 
-# Logs
+# Logs (keep directory but ignore log files)
 *.log
-logs/
+logs/*.log
+logs/*.log.*
 
 # OS
 .DS_Store
@@ -54,3 +55,6 @@ Thumbs.db
 *.tmp
 *.temp
 .cache/
+
+# CLAUDE.md
+CLAUDE.md

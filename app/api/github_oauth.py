@@ -20,6 +20,7 @@ _oauth_states = {}
 @router.get("/authorize")
 async def github_authorize(
     request: Request,
+    is_onboarding: bool = Query(False, description="True if called during onboarding flow"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -38,6 +39,7 @@ async def github_authorize(
         _oauth_states[state] = {
             "user_id": current_user.user_id,
             "team_id": current_user.team_id,
+            "is_onboarding": is_onboarding,  # Track if this is onboarding flow
             "created_at": secrets.token_hex(16)  # Timestamp placeholder
         }
 
@@ -82,6 +84,7 @@ async def github_callback(
         state_data = _oauth_states.pop(state)
         user_id = state_data["user_id"]
         team_id = state_data["team_id"]
+        is_onboarding = state_data.get("is_onboarding", False)
 
         github_service = get_github_oauth_service()
 
@@ -115,14 +118,26 @@ async def github_callback(
             "github_oauth_completed",
             user_id=user_id,
             github_user_id=github_user_info["id"],
-            github_username=github_user_info["login"]
+            github_username=github_user_info["login"],
+            is_onboarding=is_onboarding
         )
 
-        # Redirect to frontend success page
+        # Note: Indexing is NOT triggered automatically
+        # Users will select repositories to index in the next step
+
+        # Redirect based on context
         frontend_url = settings.frontend_url if hasattr(settings, 'frontend_url') else settings.app_base_url
-        return RedirectResponse(
-            url=f"{frontend_url}/integrations/github/success?username={github_user_info['login']}"
-        )
+
+        if is_onboarding:
+            # During onboarding - redirect to repository selection page
+            return RedirectResponse(
+                url=f"{frontend_url}/onboarding/repositories?team_id={team_id}&status=connected"
+            )
+        else:
+            # From settings - redirect back to settings page
+            return RedirectResponse(
+                url=f"{frontend_url}/settings/integrations?github=connected&username={github_user_info['login']}"
+            )
 
     except HTTPException:
         raise

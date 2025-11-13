@@ -33,15 +33,21 @@ async def query_slack_data(
         "query_received",
         query_id=query_id,
         user_id=request.user_id,
+        team_id=request.team_id,
         query=request.query[:100]
     )
+
+    # SECURITY: Validate team_id is provided
+    if not request.team_id:
+        logger.error("team_id_required", query_id=query_id, user_id=request.user_id)
+        raise HTTPException(status_code=400, detail="team_id is required for multi-tenancy security")
 
     try:
         # Rate limiting
         await rate_limiter.check_rate_limit(request.user_id)
 
-        # Check cache
-        cache_key = f"query:{hash(request.query)}:{request.user_id}:{request.top_k}"
+        # Check cache (SECURITY: include team_id in cache key for isolation)
+        cache_key = f"query:{hash(request.query)}:{request.user_id}:{request.team_id}:{request.top_k}"
         cached_result = await cache_manager.get(cache_key)
 
         if cached_result:
@@ -65,11 +71,12 @@ async def query_slack_data(
         for intent in analysis.get("intents", []):
             query_requests.labels(intent_type=intent).inc()
 
-        # Step 2: Multi-stage retrieval
+        # Step 2: Multi-stage retrieval (SECURITY: pass team_id for multi-tenancy filtering)
         retrieval_results = await retrieval_service.retrieve(
             query=request.query,
             query_analysis=analysis,
             user_id=request.user_id,
+            team_id=request.team_id,  # CRITICAL: Required for permission filtering
             db=db,
             top_k=request.top_k
         )
@@ -157,7 +164,7 @@ async def query_slack_data(
             ttl=300  # 5 minutes
         )
 
-        # Log query for analytics
+        # Log query for analytics (SECURITY: include team_id for proper tracking)
         await _log_query(query_id, request, analysis, len(retrieval_results), total_latency, db)
 
         logger.info(
@@ -243,6 +250,7 @@ async def _log_query(
         log_entry = QueryLog(
             query_id=query_id,
             user_id=request.user_id,
+            team_id=request.team_id,  # SECURITY: Required for multi-tenancy tracking
             query_text=request.query,
             intent_type=primary_intent,
             entities_extracted=entities,

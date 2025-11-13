@@ -109,6 +109,18 @@ class QueueConsumer:
             self._handle_initial_indexing
         )
 
+        # Slack indexing (new routing key from integration orchestrator)
+        self.register_handler(
+            "slack.index",
+            self._handle_slack_indexing
+        )
+
+        # GitHub indexing
+        self.register_handler(
+            "github.index",
+            self._handle_github_indexing
+        )
+
         # Installation events
         self.register_handler(
             "slack.event.app_uninstalled",
@@ -151,78 +163,92 @@ class QueueConsumer:
     ):
         """Process a single message from the queue"""
 
-        async with message.process():
-            try:
-                # Parse message
-                body = json.loads(message.body.decode())
-                routing_key = message.routing_key or queue_name
+        try:
+            # Parse message
+            body = json.loads(message.body.decode())
+            routing_key = message.routing_key or queue_name
+
+            logger.info(
+                "message_received",
+                queue=queue_name,
+                routing_key=routing_key,
+                message_body=body,
+                has_routing_key=bool(message.routing_key)
+            )
+
+            # Find handler - try routing key first, then queue name
+            handler = self.handlers.get(routing_key)
+
+            # For direct queue publishing (embeddings), use queue name as key
+            if not handler and routing_key == queue_name:
+                handler = self.handlers.get(queue_name)
+
+            if handler:
+                # Execute handler
+                await handler(body)
 
                 logger.info(
-                    "message_received",
+                    "message_processed",
                     queue=queue_name,
+                    routing_key=routing_key
+                )
+            else:
+                logger.warning(
+                    "no_handler_found",
                     routing_key=routing_key,
-                    message_body=body,
-                    has_routing_key=bool(message.routing_key)
+                    queue_name=queue_name,
+                    available_handlers=list(self.handlers.keys())
                 )
 
-                # Find handler - try routing key first, then queue name
-                handler = self.handlers.get(routing_key)
+        except json.JSONDecodeError as e:
+            logger.error("message_parse_error", error=str(e))
+            # Message will be rejected (not requeued) on context exit
 
-                # For direct queue publishing (embeddings), use queue name as key
-                if not handler and routing_key == queue_name:
-                    handler = self.handlers.get(queue_name)
-
-                if handler:
-                    # Execute handler
-                    await handler(body)
-
-                    logger.info(
-                        "message_processed",
-                        queue=queue_name,
-                        routing_key=routing_key
-                    )
-                else:
-                    logger.warning(
-                        "no_handler_found",
-                        routing_key=routing_key,
-                        queue_name=queue_name,
-                        available_handlers=list(self.handlers.keys())
-                    )
-
-            except json.JSONDecodeError as e:
-                logger.error("message_parse_error", error=str(e))
-                # Message will be rejected (not requeued) on context exit
-
-            except Exception as e:
-                logger.error(
-                    "message_processing_error",
-                    error=str(e),
-                    queue=queue_name
-                )
-                # Re-raise to trigger message requeue
-                raise
+        except Exception as e:
+            logger.error(
+                "message_processing_error",
+                error=str(e),
+                queue=queue_name
+            )
+            # Re-raise to trigger message requeue
+            raise
 
     # ====================
     # MESSAGE HANDLERS
     # ====================
 
     async def _handle_initial_indexing(self, message: Dict[str, Any]):
-        """Handle initial workspace indexing task"""
+        """Handle initial workspace indexing task (Glean-style with user token)"""
 
         team_id = message.get("team_id")
-        bot_token = message.get("bot_token")
+        bot_token = message.get("bot_token")  # Kept for backward compatibility
 
-        if not team_id or not bot_token:
-            logger.error("invalid_indexing_message", message=message)
+        if not team_id:
+            logger.error("invalid_indexing_message_no_team_id", message=message)
             return
 
         logger.info("starting_initial_indexing", team_id=team_id)
 
         from app.workers.initial_indexing import initial_indexing_worker
+        from app.services.workspace_service import workspace_service
+        from app.core.database import db_manager
 
         try:
-            await initial_indexing_worker.index_workspace(team_id, bot_token)
-            logger.info("initial_indexing_completed", team_id=team_id)
+            # Get user token from workspace (Glean-style indexing)
+            async for db in db_manager.get_session():
+                user_token = await workspace_service.get_installer_user_token(team_id, db)
+
+                if not user_token:
+                    logger.error(
+                        "installer_user_token_not_found",
+                        team_id=team_id,
+                        message="Cannot index without user token. May need re-installation."
+                    )
+                    return
+
+                await initial_indexing_worker.index_workspace(team_id, user_token, bot_token)
+                logger.info("initial_indexing_completed", team_id=team_id)
+                break
 
         except Exception as e:
             logger.error(
@@ -231,6 +257,73 @@ class QueueConsumer:
                 team_id=team_id
             )
             raise
+
+    async def _handle_slack_indexing(self, message: Dict[str, Any]):
+        """Handle Slack indexing task from integration orchestrator (Glean-style)"""
+
+        job_id = message.get("job_id")
+        team_id = message.get("team_id")
+        job_data = message.get("job_data", {})
+        bot_token = job_data.get("bot_token")  # Kept for backward compatibility
+
+        if not team_id:
+            logger.error("invalid_slack_indexing_message_no_team_id", message=message)
+            return
+
+        logger.info("starting_slack_indexing", team_id=team_id, job_id=job_id)
+
+        from app.workers.initial_indexing import initial_indexing_worker
+        from app.services.workspace_service import workspace_service
+        from app.core.database import db_manager
+
+        try:
+            # Get user token from workspace (Glean-style indexing)
+            async for db in db_manager.get_session():
+                user_token = await workspace_service.get_installer_user_token(team_id, db)
+
+                if not user_token:
+                    logger.error(
+                        "installer_user_token_not_found_slack_indexing",
+                        team_id=team_id,
+                        job_id=job_id,
+                        message="Cannot index without user token. May need re-installation."
+                    )
+                    return
+
+                await initial_indexing_worker.index_workspace(team_id, user_token, bot_token)
+                logger.info("slack_indexing_completed", team_id=team_id, job_id=job_id)
+                break
+
+        except Exception as e:
+            logger.error(
+                "slack_indexing_failed",
+                error=str(e),
+                team_id=team_id,
+                job_id=job_id
+            )
+            raise
+
+    async def _handle_github_indexing(self, message: Dict[str, Any]):
+        """Handle GitHub indexing task from integration orchestrator"""
+
+        job_id = message.get("job_id")
+        team_id = message.get("team_id")
+        job_data = message.get("job_data", {})
+
+        if not team_id:
+            logger.error("invalid_github_indexing_message", message=message)
+            return
+
+        logger.info("starting_github_indexing", team_id=team_id, job_id=job_id)
+
+        # GitHub indexing is handled by github_indexing_service
+        # The service creates individual IntegrationSyncJobs per repository
+        logger.info(
+            "github_indexing_acknowledged",
+            team_id=team_id,
+            job_id=job_id,
+            message="GitHub indexing handled via IntegrationSyncJobs"
+        )
 
     async def _handle_app_uninstalled(self, message: Dict[str, Any]):
         """Handle app uninstallation event"""
@@ -345,6 +438,19 @@ class QueueConsumer:
             logger.error("invalid_message_event", message=message)
             return
 
+        # Detect and log Assistant thread messages
+        subtype = event.get("subtype")
+        if subtype == "assistant_app_thread":
+            assistant_thread_data = event.get("assistant_app_thread", {})
+            logger.info(
+                "assistant_thread_message_received",
+                team_id=team_id,
+                thread_ts=event.get("thread_ts"),
+                title=assistant_thread_data.get("title"),
+                user_id=event.get("user"),
+                channel_id=event.get("channel")
+            )
+
         # Skip bot messages and message subtypes we don't want to index
         if event.get("subtype") in ["bot_message", "channel_join", "channel_leave"]:
             logger.info("skipping_message_subtype", subtype=event.get("subtype"))
@@ -372,32 +478,32 @@ class QueueConsumer:
                 channel_type = event.get("channel_type")
                 is_dm = channel_type == "im"
 
-                # Process and store the message
-                stored_message = await message_processor.process_message_event(
-                    event=event,
-                    team_id=team_id,
-                    db=db
-                )
-
-                if stored_message:
-                    logger.info(
-                        "slack_message_processed",
-                        message_id=stored_message.message_id,
-                        channel_id=stored_message.channel_id,
-                        channel_name=stored_message.channel_name,
-                        is_dm=is_dm
-                    )
-                else:
-                    logger.warning("slack_message_not_stored", event_data=event)
-
-                # If this is a DM, handle as bot interaction (auto-respond)
-                if is_dm and stored_message:
+                # If this is a DM, handle as bot interaction ONLY (don't store in messages table)
+                # DMs to the bot should only be in conversations table, not messages table
+                if is_dm:
                     logger.info(
                         "handling_dm_interaction",
-                        message_id=stored_message.message_id,
+                        channel_id=event.get("channel"),
                         user_id=event.get("user")
                     )
                     await bot_interaction_service.handle_message_event(event, db)
+                else:
+                    # Only store non-DM messages in messages table (channels, groups, etc.)
+                    stored_message = await message_processor.process_message_event(
+                        event=event,
+                        team_id=team_id,
+                        db=db
+                    )
+
+                    if stored_message:
+                        logger.info(
+                            "slack_message_processed",
+                            message_id=stored_message.message_id,
+                            channel_id=stored_message.channel_id,
+                            channel_name=stored_message.channel_name
+                        )
+                    else:
+                        logger.warning("slack_message_not_stored", event_data=event)
 
                 break  # Only use first session
 
@@ -463,37 +569,76 @@ class QueueConsumer:
             raise
 
     async def _handle_message_embedding(self, message: Dict[str, Any]):
-        """Handle message embedding generation"""
+        """Handle message and file embedding generation"""
 
-        message_id = message.get("message_id")
-        text = message.get("text")
+        # Check if this is a file or message embedding
+        embedding_type = message.get("type", "message")
 
-        if not message_id or not text:
-            logger.error("invalid_embedding_message", message=message)
-            return
+        if embedding_type == "file":
+            # File embedding
+            file_id = message.get("file_id")
 
-        logger.info("generating_message_embedding", message_id=message_id)
+            if not file_id:
+                logger.error("invalid_file_embedding_message", message=message)
+                return
 
-        try:
-            from app.services.embedding_service import embedding_service
+            logger.info("generating_file_embedding", file_id=file_id)
 
-            async for db in db_manager.get_session():
-                # Generate and store embedding
-                await embedding_service.embed_message(
-                    message_id=message_id,
-                    db=db
+            try:
+                from app.services.embedding_service import embedding_service
+
+                async for db in db_manager.get_session():
+                    # Generate and store file embedding
+                    success = await embedding_service.embed_file(
+                        file_id=file_id,
+                        db=db
+                    )
+
+                    if success:
+                        logger.info("file_embedding_generated", file_id=file_id)
+                    else:
+                        logger.warning("file_embedding_failed", file_id=file_id)
+
+                    break  # Only use first session
+
+            except Exception as e:
+                logger.error(
+                    "file_embedding_error",
+                    error=str(e),
+                    file_id=file_id
                 )
+                raise
 
-                logger.info("message_embedding_generated", message_id=message_id)
-                break  # Only use first session
+        else:
+            # Message embedding (default)
+            message_id = message.get("message_id")
 
-        except Exception as e:
-            logger.error(
-                "message_embedding_failed",
-                error=str(e),
-                message_id=message_id
-            )
-            raise
+            if not message_id:
+                logger.error("invalid_embedding_message", message=message)
+                return
+
+            logger.info("generating_message_embedding", message_id=message_id)
+
+            try:
+                from app.services.embedding_service import embedding_service
+
+                async for db in db_manager.get_session():
+                    # Generate and store embedding
+                    await embedding_service.embed_message(
+                        message_id=message_id,
+                        db=db
+                    )
+
+                    logger.info("message_embedding_generated", message_id=message_id)
+                    break  # Only use first session
+
+            except Exception as e:
+                logger.error(
+                    "message_embedding_failed",
+                    error=str(e),
+                    message_id=message_id
+                )
+                raise
 
 
 # Global queue consumer instance

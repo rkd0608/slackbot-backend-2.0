@@ -5,9 +5,13 @@ from pydantic import BaseModel, Field
 
 
 class QueryRequest(BaseModel):
-    """Query request schema"""
+    """Query request schema
+
+    SECURITY: team_id is REQUIRED for multi-tenancy isolation
+    """
     query: str = Field(..., min_length=1, max_length=1000, description="The user's query")
     user_id: str = Field(..., description="User ID making the query")
+    team_id: str = Field(..., description="Team/Workspace ID - REQUIRED for security")
     top_k: Optional[int] = Field(default=10, ge=1, le=50, description="Number of results to return")
     include_context: Optional[bool] = Field(default=True, description="Include full thread context")
 

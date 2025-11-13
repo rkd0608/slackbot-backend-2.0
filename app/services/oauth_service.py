@@ -12,6 +12,18 @@ from app.core.cache import cache_manager
 
 logger = get_logger(__name__)
 
+# Import workspace_service at module level to avoid circular imports
+# This will be used after workspace token updates to invalidate cache
+_workspace_service = None
+
+def _get_workspace_service():
+    """Lazy import to avoid circular dependency"""
+    global _workspace_service
+    if _workspace_service is None:
+        from app.services.workspace_service import workspace_service
+        _workspace_service = workspace_service
+    return _workspace_service
+
 
 class OAuthService:
     """Handles Slack OAuth flow for workspace installation"""
@@ -37,25 +49,31 @@ class OAuthService:
             "users:read.email"
         ]
 
-        # Bot token scopes (17 scopes - matches Glean)
+        # Bot token scopes (23 scopes - complete set for all features)
         self.bot_scopes = [
-            "app_mentions:read",
-            "assistant:write",
-            "channels:history",
-            "channels:read",
-            "chat:write",
-            "chat:write.public",
-            "commands",
-            "groups:history",
-            "groups:read",
-            "im:history",
-            "im:write",
-            "links:read",
-            "links:write",
-            "mpim:history",
-            "mpim:read",
-            "reactions:write",
-            "users:read"
+            "app_mentions:read",      # Read when bot is mentioned
+            "assistant:write",         # Use Assistant API
+            "channels:history",        # Read public channel messages
+            "channels:join",          # Join channels automatically
+            "channels:read",          # View basic channel info
+            "chat:write",             # Send messages
+            "chat:write.public",      # Send to channels bot isn't in
+            "commands",               # Receive slash commands
+            "files:read",             # Read file info and download files
+            "groups:history",         # Read private channel messages
+            "groups:read",            # View private channel info
+            "im:history",             # Read DM messages
+            "im:read",                # View DM info
+            "im:write",               # Send DMs
+            "links:read",             # Read message links
+            "links:write",            # Unfurl links
+            "mpim:history",           # Read group DM messages
+            "mpim:read",              # View group DM info
+            "reactions:read",         # Read reactions for feedback
+            "reactions:write",        # Add reactions
+            "team:read",              # Read workspace info
+            "users:read",             # Read user profiles
+            "users:read.email"        # Read user emails
         ]
 
     async def generate_oauth_url(self) -> Dict[str, str]:
@@ -206,6 +224,34 @@ class OAuthService:
         }
         return limits.get(tier, 500)
 
+    async def validate_token(self, token: str) -> bool:
+        """Validate that a Slack token is currently active"""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://slack.com/api/auth.test",
+                    headers={"Authorization": f"Bearer {token}"}
+                )
+                result = response.json()
+
+                if result.get("ok"):
+                    logger.info(
+                        "token_validated",
+                        team_id=result.get("team_id"),
+                        bot_id=result.get("bot_id")
+                    )
+                    return True
+                else:
+                    logger.error(
+                        "token_invalid",
+                        error=result.get("error"),
+                        token_prefix=token[:20] if token else "none"
+                    )
+                    return False
+        except Exception as e:
+            logger.error("token_validation_error", error=str(e))
+            return False
+
     async def create_workspace(
         self,
         oauth_data: Dict[str, Any],
@@ -218,6 +264,16 @@ class OAuthService:
         team = workspace_info["team"]
         auth = workspace_info["auth"]
         user_count = workspace_info["user_count"]
+
+        # Validate token before saving (catches immediate issues)
+        bot_token = oauth_data["access_token"]
+        is_valid = await self.validate_token(bot_token)
+        if not is_valid:
+            logger.warning(
+                "saving_potentially_invalid_token",
+                team_id=team["id"],
+                message="Token failed validation but saving anyway - may need manual update"
+            )
 
         # Determine tier and limits
         tier = self.determine_pricing_tier(user_count)
@@ -240,6 +296,26 @@ class OAuthService:
             authed_user = oauth_data.get("authed_user", {})
             user_id = authed_user.get("id") or authed_user.get("user_id") or existing_workspace.installer_user_id
 
+            # Store installer's user token for Glean-style indexing
+            if authed_user.get("access_token"):
+                try:
+                    from app.core.encryption import get_encryption_service
+                    encryption_service = get_encryption_service()
+                    existing_workspace.installer_user_token = encryption_service.encrypt(
+                        authed_user.get("access_token")
+                    )
+                    logger.info(
+                        "installer_user_token_updated",
+                        team_id=team["id"],
+                        user_id=user_id
+                    )
+                except Exception as e:
+                    logger.error(
+                        "installer_token_encryption_failed",
+                        error=str(e),
+                        team_id=team["id"]
+                    )
+
             # Log reinstallation
             log = InstallationLog(
                 team_id=team["id"],
@@ -255,6 +331,10 @@ class OAuthService:
 
             await db.commit()
             await db.refresh(existing_workspace)
+
+            # Invalidate workspace cache since token was updated
+            ws_service = _get_workspace_service()
+            await ws_service.invalidate_workspace_cache(team["id"])
 
             logger.info(
                 "workspace_reinstalled",
@@ -272,6 +352,27 @@ class OAuthService:
         authed_user = oauth_data.get("authed_user", {})
         installer_user_id = authed_user.get("id") or authed_user.get("user_id") or auth.get("user_id", "")
 
+        # Encrypt installer's user token for Glean-style indexing
+        installer_user_token_encrypted = None
+        if authed_user.get("access_token"):
+            try:
+                from app.core.encryption import get_encryption_service
+                encryption_service = get_encryption_service()
+                installer_user_token_encrypted = encryption_service.encrypt(
+                    authed_user.get("access_token")
+                )
+                logger.info(
+                    "installer_user_token_encrypted",
+                    team_id=team["id"],
+                    installer_user_id=installer_user_id
+                )
+            except Exception as e:
+                logger.error(
+                    "installer_token_encryption_failed_new_install",
+                    error=str(e),
+                    team_id=team["id"]
+                )
+
         workspace = Workspace(
             team_id=team["id"],
             team_name=team["name"],
@@ -281,6 +382,7 @@ class OAuthService:
             bot_user_id=auth["user_id"],
             bot_scopes=oauth_data.get("scope", "").split(","),
             installer_user_id=installer_user_id,
+            installer_user_token=installer_user_token_encrypted,
             installer_email=installer_email,
             installed_at=datetime.utcnow(),
             is_active=1,

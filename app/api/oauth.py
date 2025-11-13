@@ -104,6 +104,32 @@ async def oauth_callback(
             )
             db.add(user)
 
+        # Store user's access token (Glean-style user-centric access)
+        from app.core.encryption import get_encryption_service
+
+        encryption_service = get_encryption_service()
+        authed_user = oauth_data.get("authed_user", {})
+
+        if authed_user.get("access_token"):
+            try:
+                # Encrypt and store user access token
+                user.access_token = encryption_service.encrypt(authed_user.get("access_token"))
+                user.token_expires_at = None  # Slack user tokens don't expire automatically
+
+                logger.info(
+                    "user_token_stored",
+                    user_id=user.user_id,
+                    team_id=workspace.team_id,
+                    scopes=authed_user.get("scope", "").split(",") if authed_user.get("scope") else []
+                )
+            except Exception as e:
+                logger.error(
+                    "user_token_storage_failed",
+                    error=str(e),
+                    user_id=user.user_id
+                )
+                # Don't fail the entire OAuth flow if token storage fails
+
         await db.commit()
         await db.refresh(user)
         await db.refresh(workspace)
@@ -116,6 +142,10 @@ async def oauth_callback(
             is_trial=workspace.is_trial,
             profile_completed=user.profile_completed
         )
+
+        # Note: Indexing is NOT triggered automatically here
+        # Users will select which channels to index during onboarding flow
+        # Indexing will be triggered from the channel selection endpoint
 
         # Redirect to frontend
         from app.core.config import settings
